@@ -20,7 +20,10 @@ This repo follows the operating constraints in [agents.md](/C:/Users/joelb/OneDr
 |-- experiments/   # reproducible experiment configs and run metadata
 |-- src/
 |   |-- data/      # loading and preprocessing
-|   |-- evaluation/# metrics and comparison logic
+|   |-- downstream/# founder-success route training and prediction
+|   |-- evaluation/# metrics and threshold logic
+|   |-- llm_engineering/ # imported rule-generation adapter + placeholders
+|   |-- pipeline/  # config + orchestration entrypoints
 |   |-- student/   # distilled model code
 |   |-- teacher/   # teacher policy / scoring pipeline
 |   `-- utils/     # shared helpers
@@ -28,11 +31,28 @@ This repo follows the operating constraints in [agents.md](/C:/Users/joelb/OneDr
 `-- tmp/           # disposable intermediate artifacts
 ```
 
-## Next Steps
+## Current Entry Points
 
-Add concrete pipeline code only after the following are explicit:
+- Default experiment config:
+  [experiments/teacher_student_distillation_v1.json](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/experiments/teacher_student_distillation_v1.json)
+- CLI entrypoint:
+  `python -m src.pipeline.run_distillation --config experiments/teacher_student_distillation_v1.json`
+- Scoping docs:
+  [docs/scoping_summary.md](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/docs/scoping_summary.md)
+  [docs/implementation_plan.md](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/docs/implementation_plan.md)
+  [docs/pipeline_architecture.md](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/docs/pipeline_architecture.md)
+  [docs/repo_architecture.md](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/docs/repo_architecture.md)
+  [docs/current_workflows.md](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/docs/current_workflows.md)
 
-- dataset schema and storage format
-- teacher output format
-- student training objective
-- evaluation metrics and comparison protocol
+## Remaining Inputs
+
+The default config now treats the on-disk policy files as the reasoning target bank:
+
+- public train targets:
+  [data/reasoning_feature_targets/policy_features.csv](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/data/reasoning_feature_targets/policy_features.csv)
+- held-out comparable targets:
+  [data/reasoning_feature_targets/policy_features_test.csv](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/data/reasoning_feature_targets/policy_features_test.csv)
+
+The default config explicitly selects the 10 policy targets exposed by the held-out file and trains one model per selected target.
+The default input side is a deterministic founder-baseline feature builder derived from the raw VCBench files.
+Future feature families can be added through the `input_features` config block.

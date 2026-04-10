@@ -3,8 +3,9 @@
 Each experiment should be reproducible and declare:
 
 - inputs
-- outputs
 - configuration
-- evaluation outputs
+- model registries
+- promotion policy
 
-Keep experiment-specific assets here rather than mixing them into `src/`.
+Keep committed experiment configs and comparison notes here rather than mixing them into `src/`.
+Generated run artifacts, temporary predictions, and scratch outputs belong in `tmp/`, not here.

@@ -1,1 +1,1 @@
-"""Evaluation metrics and comparison utilities."""
+"""Evaluation metrics and threshold-selection utilities."""
