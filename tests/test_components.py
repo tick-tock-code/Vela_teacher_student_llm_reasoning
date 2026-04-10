@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.targets import load_reasoning_target_bank
 from src.gui.run_launcher import RunLauncher, LauncherSelections, selections_to_overrides
+from src.data.splits import build_stratified_reasoning_cv_splits
 from src.intermediary_features.mirror import build_vcbench_mirror_frames
 from src.intermediary_features.registry import assemble_feature_sets
 from src.intermediary_features.sentence_transformer import build_sentence_transformer_frames
@@ -225,11 +226,30 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(feature_set.public_frame["founder_uuid"].tolist(), ["b", "a"])
         self.assertEqual(feature_set.private_frame["founder_uuid"].tolist(), ["y", "x"])
 
+    def test_stratified_reasoning_splits_cover_all_rows(self) -> None:
+        targets = pd.DataFrame(
+            {
+                "Policy_1": [0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9, 0.15, 0.85, 0.25, 0.75],
+                "Policy_2": [0.2, 0.3, 0.35, 0.45, 0.55, 0.65, 0.78, 0.88, 0.18, 0.82, 0.28, 0.72],
+            }
+        )
+        splits = build_stratified_reasoning_cv_splits(
+            targets,
+            n_splits=3,
+            shuffle=True,
+            random_state=42,
+        )
+
+        self.assertEqual(len(splits), 3)
+        covered = sorted(index for split in splits for index in split.test_idx.tolist())
+        self.assertEqual(covered, list(range(len(targets))))
+
     def test_cli_override_parsing_and_inactive_flag_validation(self) -> None:
         overrides = parse_run_overrides(
             [
                 "--config",
                 "experiments/teacher_student_distillation_v1.json",
+                "--run-heldout-reasoning-predictions",
                 "--active-intermediary-features",
                 "mirror",
                 "sentence_prose",
@@ -241,6 +261,7 @@ class ComponentTests(unittest.TestCase):
             ]
         )
         self.assertTrue(overrides.run_success_predictions)
+        self.assertTrue(overrides.run_heldout_reasoning_predictions)
         self.assertEqual(overrides.active_intermediary_features, ["mirror", "sentence_prose"])
         self.assertEqual(overrides.reasoning_models, ["ridge"])
 
@@ -263,6 +284,7 @@ class ComponentTests(unittest.TestCase):
             selections = LauncherSelections(
                 config_path="experiments/teacher_student_distillation_v1.json",
                 run_reasoning_predictions=True,
+                run_heldout_reasoning_predictions=True,
                 run_success_predictions=False,
                 active_intermediary_features=["mirror", "sentence_prose"],
                 force_rebuild_intermediary_features=True,
@@ -272,6 +294,7 @@ class ComponentTests(unittest.TestCase):
             overrides = selections_to_overrides(selections)
             self.assertEqual(overrides.active_intermediary_features, ["mirror", "sentence_prose"])
             self.assertTrue(overrides.force_rebuild_intermediary_features)
+            self.assertTrue(overrides.run_heldout_reasoning_predictions)
             self.assertEqual(overrides.reasoning_models, ["ridge"])
         finally:
             root.destroy()

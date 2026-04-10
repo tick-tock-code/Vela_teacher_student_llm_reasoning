@@ -7,7 +7,7 @@ from typing import Callable
 import pandas as pd
 
 from src.data.raw_datasets import load_raw_datasets
-from src.data.splits import build_cv_splits
+from src.data.splits import build_stratified_reasoning_cv_splits
 from src.data.targets import load_reasoning_target_bank, target_manifest_payload
 from src.evaluation.metrics import regression_metrics
 from src.intermediary_features.registry import assemble_feature_sets, prepare_intermediary_banks
@@ -152,7 +152,7 @@ def run_distillation_experiment(
     )
 
     heldout_target_rows = None
-    if reasoning_targets.test_frame is not None:
+    if resolved_run.run_heldout_reasoning_predictions and reasoning_targets.test_frame is not None:
         heldout_target_rows = _require_full_overlap(
             raw_datasets.private_frame[["founder_uuid"]],
             reasoning_targets.test_frame,
@@ -162,8 +162,8 @@ def run_distillation_experiment(
         )
 
     target_columns = reasoning_targets.train_target_columns
-    splits = build_cv_splits(
-        len(public_target_rows),
+    splits = build_stratified_reasoning_cv_splits(
+        public_target_rows[target_columns],
         n_splits=config.cv.n_splits,
         shuffle=config.cv.shuffle,
         random_state=config.cv.random_state,
@@ -206,47 +206,48 @@ def run_distillation_experiment(
             ),
         )
 
-        heldout_feature_rows = _require_full_overlap(
-            raw_datasets.private_frame[["founder_uuid"]],
-            feature_set.private_frame,
-            on="founder_uuid",
-            left_name=f"held-out ids for '{feature_set.feature_set_id}'",
-            right_name=f"held-out feature set '{feature_set.feature_set_id}'",
-        )
-        fitted_models = fit_reasoning_regressors_full(
-            public_feature_rows[feature_set.feature_columns],
-            public_target_rows[target_columns],
-            target_columns=target_columns,
-            model_specs=resolved_run.reasoning_models,
-            random_state=config.cv.random_state,
-        )
-        heldout_predictions = predict_reasoning_regressors_full(
-            heldout_feature_rows[feature_set.feature_columns],
-            founder_ids=heldout_feature_rows["founder_uuid"],
-            target_columns=target_columns,
-            model_specs=resolved_run.reasoning_models,
-            fitted_models=fitted_models,
-            scale_min=reasoning_targets.scale_min,
-            scale_max=reasoning_targets.scale_max,
-        )
-        combined_heldout_predictions = _merge_prediction_tables(
-            combined_heldout_predictions,
-            _prefix_prediction_columns(
-                heldout_predictions,
-                feature_set_id=feature_set.feature_set_id,
-            ),
-        )
-
-        if heldout_target_rows is not None:
-            heldout_metric_frames.append(
-                _evaluate_heldout_predictions(
-                    feature_set_id=feature_set.feature_set_id,
-                    heldout_targets=heldout_target_rows,
-                    heldout_predictions=heldout_predictions,
-                    target_columns=target_columns,
-                    model_specs=resolved_run.reasoning_models,
-                )
+        if resolved_run.run_heldout_reasoning_predictions:
+            heldout_feature_rows = _require_full_overlap(
+                raw_datasets.private_frame[["founder_uuid"]],
+                feature_set.private_frame,
+                on="founder_uuid",
+                left_name=f"held-out ids for '{feature_set.feature_set_id}'",
+                right_name=f"held-out feature set '{feature_set.feature_set_id}'",
             )
+            fitted_models = fit_reasoning_regressors_full(
+                public_feature_rows[feature_set.feature_columns],
+                public_target_rows[target_columns],
+                target_columns=target_columns,
+                model_specs=resolved_run.reasoning_models,
+                random_state=config.cv.random_state,
+            )
+            heldout_predictions = predict_reasoning_regressors_full(
+                heldout_feature_rows[feature_set.feature_columns],
+                founder_ids=heldout_feature_rows["founder_uuid"],
+                target_columns=target_columns,
+                model_specs=resolved_run.reasoning_models,
+                fitted_models=fitted_models,
+                scale_min=reasoning_targets.scale_min,
+                scale_max=reasoning_targets.scale_max,
+            )
+            combined_heldout_predictions = _merge_prediction_tables(
+                combined_heldout_predictions,
+                _prefix_prediction_columns(
+                    heldout_predictions,
+                    feature_set_id=feature_set.feature_set_id,
+                ),
+            )
+
+            if heldout_target_rows is not None:
+                heldout_metric_frames.append(
+                    _evaluate_heldout_predictions(
+                        feature_set_id=feature_set.feature_set_id,
+                        heldout_targets=heldout_target_rows,
+                        heldout_predictions=heldout_predictions,
+                        target_columns=target_columns,
+                        model_specs=resolved_run.reasoning_models,
+                    )
+                )
 
     write_csv(
         run_dir / "reasoning_oof_predictions.csv",
@@ -256,17 +257,18 @@ def run_distillation_experiment(
         run_dir / "reasoning_metrics.csv",
         pd.concat(public_metric_frames, ignore_index=True) if public_metric_frames else pd.DataFrame(),
     )
-    write_csv(
-        run_dir / "reasoning_heldout_predictions.csv",
-        combined_heldout_predictions
-        if combined_heldout_predictions is not None
-        else pd.DataFrame({"founder_uuid": []}),
-    )
-    if heldout_metric_frames:
+    if resolved_run.run_heldout_reasoning_predictions:
         write_csv(
-            run_dir / "reasoning_heldout_metrics.csv",
-            pd.concat(heldout_metric_frames, ignore_index=True),
+            run_dir / "reasoning_heldout_predictions.csv",
+            combined_heldout_predictions
+            if combined_heldout_predictions is not None
+            else pd.DataFrame({"founder_uuid": []}),
         )
+        if heldout_metric_frames:
+            write_csv(
+                run_dir / "reasoning_heldout_metrics.csv",
+                pd.concat(heldout_metric_frames, ignore_index=True),
+            )
 
     summary_lines = [
         "# Run Summary",
@@ -275,9 +277,12 @@ def run_distillation_experiment(
         f"- Intermediary banks prepared: {len(banks_by_id)}",
         f"- Feature-set comparisons run: {len(feature_sets)}",
         f"- Reasoning models run per target: {len(resolved_run.reasoning_models)}",
+        "- Public CV strategy: stratified on quantile buckets of the row-wise mean selected target score.",
         f"- OOF prediction columns written: {0 if combined_oof_predictions is None else len(combined_oof_predictions.columns) - 1}",
         f"- Held-out prediction columns written: {0 if combined_heldout_predictions is None else len(combined_heldout_predictions.columns) - 1}",
     ]
+    if not resolved_run.run_heldout_reasoning_predictions:
+        summary_lines.append("- Held-out reasoning prediction was skipped because it was not requested.")
     write_markdown(run_dir / "run_summary.md", "\n".join(summary_lines))
     _log(logger, f"Run complete. Artifacts written to {run_dir}.")
     return run_dir

@@ -5,7 +5,7 @@ The PDF thesis in [Proposed project direction.pdf](/C:/Users/joelb/OneDrive/Vela
 - expensive, interpretable LLM reasoning acts as the teacher
 - a cheaper student should recover that signal with much lower inference cost
 
-The active repo implementation is narrower than the PDF’s original framing.
+The active repo implementation is narrower than the PDF's original framing.
 
 Here, the reasoning features are the targets:
 
@@ -23,7 +23,7 @@ That means the current project is not about Features A-F and is not currently ab
 - feature extraction from raw founder data
 - reusable intermediary bank storage
 - per-target reasoning regression
-- held-out agreement on the 10 policies shared with `policy_features_test.csv`
+- optional held-out agreement on the 10 policies shared with `policy_features_test.csv`
 
 The three active feature families are:
 

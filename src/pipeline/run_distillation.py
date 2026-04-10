@@ -23,6 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the reasoning reconstruction pipeline.",
     )
     parser.add_argument(
+        "--run-heldout-reasoning-predictions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Opt in to held-out reasoning prediction and held-out agreement reporting.",
+    )
+    parser.add_argument(
         "--run-success-predictions",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -60,6 +66,7 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
     return RunOverrides(
         config_path=args.config,
         run_reasoning_predictions=bool(args.run_reasoning_predictions),
+        run_heldout_reasoning_predictions=bool(args.run_heldout_reasoning_predictions),
         run_success_predictions=bool(args.run_success_predictions),
         active_intermediary_features=(
             [str(item) for item in args.active_intermediary_features]

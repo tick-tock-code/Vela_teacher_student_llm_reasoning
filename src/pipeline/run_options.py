@@ -12,6 +12,7 @@ DEFAULT_CONFIG_PATH = "experiments/teacher_student_distillation_v1.json"
 class RunOverrides:
     config_path: str = DEFAULT_CONFIG_PATH
     run_reasoning_predictions: bool = True
+    run_heldout_reasoning_predictions: bool = False
     run_success_predictions: bool = False
     active_intermediary_features: list[str] | None = None
     force_rebuild_intermediary_features: bool = False
@@ -24,6 +25,7 @@ class RunOverrides:
 class ResolvedRunOptions:
     config_path: str
     run_reasoning_predictions: bool
+    run_heldout_reasoning_predictions: bool
     active_intermediary_features: list[str]
     force_rebuild_intermediary_features: bool
     reasoning_targets: list[ReasoningTargetSpec]
@@ -122,6 +124,7 @@ def resolve_run_options(
     return ResolvedRunOptions(
         config_path=overrides_use.config_path,
         run_reasoning_predictions=True,
+        run_heldout_reasoning_predictions=bool(overrides_use.run_heldout_reasoning_predictions),
         active_intermediary_features=[spec.feature_id for spec in selected_feature_specs],
         force_rebuild_intermediary_features=overrides_use.force_rebuild_intermediary_features,
         reasoning_targets=selected_targets,

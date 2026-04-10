@@ -6,7 +6,7 @@ The active pipeline:
 
 - builds reusable intermediary feature banks under `data/intermediary_features/`
 - trains one regressor per selected policy target
-- predicts the 10 held-out policy targets exposed by `policy_features_test.csv`
+- optionally predicts the 10 held-out policy targets exposed by `policy_features_test.csv`
 - compares reasoning-reconstruction quality across feature families and model choices
 
 Features A-F are out of scope here. Founder-success prediction remains dormant future work and is not part of the default run.
@@ -36,6 +36,9 @@ LLM-engineered feature generation is scaffolded but inactive until custom prompt
   `C:\Users\joelb\.conda\envs\vela_TRL\python.exe -m src.pipeline.run_distillation --config experiments/teacher_student_distillation_v1.json`
 - GUI:
   `C:\Users\joelb\.conda\envs\vela_TRL\python.exe -m src.gui.run_launcher`
+
+Public CV is stratified using quantile buckets of the row-wise mean selected target score.
+Held-out prediction is opt-in via `--run-heldout-reasoning-predictions` or the matching GUI checkbox.
 
 ## Key Docs
 

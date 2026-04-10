@@ -39,6 +39,6 @@ This is the canonical folder layout for the reasoning-reconstruction project.
 
 There is one active modeling path:
 
-- VCBench raw data -> intermediary feature banks -> per-target reasoning regressors -> held-out reasoning predictions
+- VCBench raw data -> intermediary feature banks -> per-target reasoning regressors -> optional held-out reasoning predictions
 
 Anything outside that path is dormant, including founder-success prediction.

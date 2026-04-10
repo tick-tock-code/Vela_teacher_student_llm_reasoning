@@ -25,14 +25,14 @@
 2. Load the reasoning target bank and restrict it to the explicitly selected targets.
 3. Build or reuse the selected intermediary feature banks.
 4. Assemble configured feature sets from those banks.
-5. Build deterministic public CV splits.
+5. Build deterministic stratified public CV splits from quantile buckets of the row-wise mean selected target score.
 6. For each feature set:
    - train one regressor per selected policy target and reasoning model
    - write OOF predictions
    - score public agreement
-   - refit on the full public set
-   - predict the held-out set
-   - score held-out agreement
+   - if requested, refit on the full public set
+   - if requested, predict the held-out set
+   - if requested, score held-out agreement
 
 ## Config Contract
 

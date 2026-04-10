@@ -15,6 +15,7 @@ from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides
 class LauncherSelections:
     config_path: str
     run_reasoning_predictions: bool
+    run_heldout_reasoning_predictions: bool
     run_success_predictions: bool
     active_intermediary_features: list[str]
     force_rebuild_intermediary_features: bool
@@ -26,6 +27,7 @@ def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
     return RunOverrides(
         config_path=selections.config_path,
         run_reasoning_predictions=selections.run_reasoning_predictions,
+        run_heldout_reasoning_predictions=selections.run_heldout_reasoning_predictions,
         run_success_predictions=selections.run_success_predictions,
         active_intermediary_features=selections.active_intermediary_features,
         force_rebuild_intermediary_features=selections.force_rebuild_intermediary_features,
@@ -44,6 +46,7 @@ class RunLauncher(ttk.Frame):
         self.config_path_var = tk.StringVar(value=initial_config_path)
         self.embedding_model_var = tk.StringVar(value="sentence-transformers/all-MiniLM-L6-v2")
         self.run_reasoning_var = tk.BooleanVar(value=True)
+        self.run_heldout_reasoning_var = tk.BooleanVar(value=False)
         self.run_success_var = tk.BooleanVar(value=False)
         self.force_rebuild_var = tk.BooleanVar(value=False)
         self.feature_vars = {
@@ -130,21 +133,26 @@ class RunLauncher(ttk.Frame):
             text="Run reasoning predictions",
             variable=self.run_reasoning_var,
         ).grid(row=0, column=0, sticky="w", columnspan=2)
+        ttk.Checkbutton(
+            options_frame,
+            text="Run held-out reasoning predictions",
+            variable=self.run_heldout_reasoning_var,
+        ).grid(row=1, column=0, sticky="w", columnspan=2)
         self.run_success_control = ttk.Checkbutton(
             options_frame,
             text="Run success predictions (inactive)",
             variable=self.run_success_var,
             state="disabled",
         )
-        self.run_success_control.grid(row=1, column=0, sticky="w", columnspan=2)
+        self.run_success_control.grid(row=2, column=0, sticky="w", columnspan=2)
         ttk.Checkbutton(
             options_frame,
             text="Force rebuild intermediary features",
             variable=self.force_rebuild_var,
-        ).grid(row=2, column=0, sticky="w", columnspan=2)
-        ttk.Label(options_frame, text="Embedding model").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ).grid(row=3, column=0, sticky="w", columnspan=2)
+        ttk.Label(options_frame, text="Embedding model").grid(row=4, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(options_frame, textvariable=self.embedding_model_var).grid(
-            row=3, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
+            row=4, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
         )
 
         action_frame = ttk.Frame(self)
@@ -195,6 +203,7 @@ class RunLauncher(ttk.Frame):
         return LauncherSelections(
             config_path=self.config_path_var.get().strip(),
             run_reasoning_predictions=bool(self.run_reasoning_var.get()),
+            run_heldout_reasoning_predictions=bool(self.run_heldout_reasoning_var.get()),
             run_success_predictions=bool(self.run_success_var.get()),
             active_intermediary_features=active_features,
             force_rebuild_intermediary_features=bool(self.force_rebuild_var.get()),

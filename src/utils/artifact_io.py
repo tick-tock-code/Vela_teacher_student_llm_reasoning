@@ -61,5 +61,5 @@ def write_parquet(path: Path, frame: pd.DataFrame) -> Path:
 
 
 def timestamped_run_dir(root: Path, label: str) -> Path:
-    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
     return ensure_dir(root / f"{stamp}_{label}")

@@ -23,10 +23,10 @@ Implement reusable intermediary feature generation:
 Implement the reasoning-only training loop:
 
 - explicit target list from config
-- 3-fold public CV
+- stratified 3-fold public CV
 - one regressor per selected policy target
 - feature-set comparison runs
-- held-out prediction and agreement scoring
+- optional held-out prediction and agreement scoring
 
 ## Stage 4
 
@@ -47,9 +47,12 @@ Each run under `tmp/runs/<experiment_id>/...` should write:
 - `feature_set_manifest.json`
 - `reasoning_oof_predictions.csv`
 - `reasoning_metrics.csv`
+- `run_summary.md`
+
+When held-out prediction is requested, the run should additionally write:
+
 - `reasoning_heldout_predictions.csv`
 - `reasoning_heldout_metrics.csv`
-- `run_summary.md`
 
 ## Important Constraints
 

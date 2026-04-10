@@ -163,8 +163,8 @@ class PipelineSmokeTests(unittest.TestCase):
 
             self.assertTrue((first_run_dir / "reasoning_oof_predictions.csv").exists())
             self.assertTrue((first_run_dir / "reasoning_metrics.csv").exists())
-            self.assertTrue((first_run_dir / "reasoning_heldout_predictions.csv").exists())
-            self.assertTrue((first_run_dir / "reasoning_heldout_metrics.csv").exists())
+            self.assertFalse((first_run_dir / "reasoning_heldout_predictions.csv").exists())
+            self.assertFalse((first_run_dir / "reasoning_heldout_metrics.csv").exists())
             self.assertTrue((first_run_dir / "intermediary_feature_manifests.json").exists())
             self.assertTrue((first_run_dir / "feature_set_manifest.json").exists())
             self.assertFalse((first_run_dir / "downstream_public_summary.csv").exists())
@@ -175,15 +175,41 @@ class PipelineSmokeTests(unittest.TestCase):
             self.assertIn("mirror__Policy_2__ridge", oof_predictions.columns)
             self.assertNotIn("mirror__Policy_0__ridge", oof_predictions.columns)
 
-            heldout_metrics = pd.read_csv(first_run_dir / "reasoning_heldout_metrics.csv")
-            self.assertEqual(sorted(heldout_metrics["target_id"].tolist()), ["Policy_1", "Policy_2"])
-            self.assertTrue((heldout_metrics["feature_set_id"] == "mirror").all())
-
             target_manifest = json.loads((first_run_dir / "reasoning_target_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(target_manifest["available_train_target_count"], 3)
             self.assertEqual(target_manifest["train_target_count"], 2)
 
             self.assertEqual(first_mtime, second_mtime)
             self.assertTrue(second_run_dir.exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_heldout_prediction_outputs_require_opt_in(self) -> None:
+        root = _workspace_temp_dir()
+        try:
+            self._write_fixtures(root)
+            config_path = self._write_config(root)
+            config = load_experiment_config(str(config_path))
+            overrides = RunOverrides(
+                config_path=str(config_path),
+                active_intermediary_features=["mirror"],
+                reasoning_models=["ridge"],
+                run_heldout_reasoning_predictions=True,
+            )
+
+            runs_root = root / "r"
+            intermediary_root = root / "i"
+            with mock.patch("src.pipeline.distillation.RUNS_DIR", runs_root), mock.patch(
+                "src.intermediary_features.storage.INTERMEDIARY_FEATURES_DIR",
+                intermediary_root,
+            ):
+                run_dir = run_reasoning_reconstruction(config, overrides)
+
+            self.assertTrue((run_dir / "reasoning_heldout_predictions.csv").exists())
+            self.assertTrue((run_dir / "reasoning_heldout_metrics.csv").exists())
+
+            heldout_metrics = pd.read_csv(run_dir / "reasoning_heldout_metrics.csv")
+            self.assertEqual(sorted(heldout_metrics["target_id"].tolist()), ["Policy_1", "Policy_2"])
+            self.assertTrue((heldout_metrics["feature_set_id"] == "mirror").all())
         finally:
             shutil.rmtree(root, ignore_errors=True)
