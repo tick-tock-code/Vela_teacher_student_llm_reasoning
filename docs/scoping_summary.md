@@ -1,39 +1,34 @@
 # Scoping Summary
 
-This repo is the first implementation of a teacher-student reasoning distillation workflow for founder prediction.
+The PDF thesis in [Proposed project direction.pdf](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/docs/Proposed%20project%20direction.pdf) is still the right high-level frame:
 
-The project direction from [Proposed project direction.pdf](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/docs/Proposed%20project%20direction.pdf) is:
+- expensive, interpretable LLM reasoning acts as the teacher
+- a cheaper student should recover that signal with much lower inference cost
 
-- use expensive, interpretable LLM reasoning as the teacher
-- train a cheaper student to recover most of that signal
-- compare agreement, deployment cost, and downstream founder-success performance
+The active repo implementation is narrower than the PDF’s original framing.
 
-This repo's v1 implementation is narrower and more operational than the PDF:
+Here, the reasoning features are the targets:
 
-- the student predicts numeric policy reasoning targets with regression models
-- the public set is the supervised training domain and the private set is the held-out prediction domain
-- downstream founder-success comparisons use true reasoning targets versus student-predicted reasoning targets
-- promotion to private-set prediction is manually gated
+- public teacher targets:
+  [data/reasoning_feature_targets/policy_features.csv](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/data/reasoning_feature_targets/policy_features.csv)
+- held-out comparable targets:
+  [data/reasoning_feature_targets/policy_features_test.csv](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/data/reasoning_feature_targets/policy_features_test.csv)
 
-Current data reality matters:
+The model inputs are built separately from raw VCBench founder data. The active repo question is:
 
-- the raw VCBench public and private CSVs live under `data/VCBench_data/`
-- the reasoning target bank lives under `data/reasoning_feature_targets/`
-- `policy_features.csv` is the public teacher target table with 48 policy targets
-- `policy_features_test.csv` is the held-out target table with 10 comparable policy targets
-- the model input side is now separate from the target side and defaults to a deterministic founder-baseline feature builder derived from raw VCBench rows
+Can reusable intermediary feature banks extracted from VCBench reconstruct the selected 10 policy targets well enough to approximate the teacher?
 
-The old `LLM_Reasoning_Main` repo is used as a source of reusable infrastructure, not as something to copy wholesale:
+That means the current project is not about Features A-F and is not currently about founder-success prediction. The active work is:
 
-- keep path helpers, artifact IO, loading/alignment utilities, metrics, and model helpers
-- import the LLM-engineering adapter and cache layout
-- do not port instability-control study logic
+- feature extraction from raw founder data
+- reusable intermediary bank storage
+- per-target reasoning regression
+- held-out agreement on the 10 policies shared with `policy_features_test.csv`
 
-The implementation also leaves strict placeholders where the project is not yet decision-complete:
+The three active feature families are:
 
-- custom LLM-engineering prompt loading
-- custom prompt rendering
-- custom rule post-processing
-- any future transforms that depend on not-yet-provided methods
+- `vcbench_mirror_baseline_v1`
+- `sentence_transformer_prose_v1`
+- `sentence_transformer_structured_v1`
 
-Those placeholders are designed to fail loudly with `NotImplementedError` so the repo cannot silently do the wrong thing.
+LLM-engineered features remain an intended future family, but the prompt-specific logic is still a strict placeholder and must fail loudly until custom prompts are provided.

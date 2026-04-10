@@ -54,6 +54,12 @@ def write_csv(path: Path, frame: pd.DataFrame) -> Path:
     return path
 
 
+def write_parquet(path: Path, frame: pd.DataFrame) -> Path:
+    ensure_dir(path.parent)
+    frame.to_parquet(path, index=False)
+    return path
+
+
 def timestamped_run_dir(root: Path, label: str) -> Path:
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     return ensure_dir(root / f"{stamp}_{label}")

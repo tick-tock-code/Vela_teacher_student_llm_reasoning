@@ -1,1 +1,1 @@
-"""Pipeline config and orchestration for teacher-student reasoning distillation."""
+"""Pipeline config and orchestration for reasoning reconstruction."""

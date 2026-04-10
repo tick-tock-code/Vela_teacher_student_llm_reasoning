@@ -5,6 +5,7 @@ import importlib.util
 
 INSTALL_HINTS = {
     "openai": "pip install openai",
+    "sentence_transformers": "pip install sentence-transformers transformers torch",
     "think_reason_learn": "Install the think_reason_learn package or make it importable in this environment.",
     "xgboost": "pip install xgboost",
 }

@@ -2,20 +2,17 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
-from src.data.input_features import build_input_features
 from src.data.raw_datasets import load_raw_datasets
-from src.data.splits import build_public_cv_splits
+from src.data.splits import build_cv_splits
 from src.data.targets import load_reasoning_target_bank, target_manifest_payload
-from src.downstream.routes import (
-    evaluate_public_downstream_routes,
-    extract_predicted_reasoning_features,
-    predict_private_downstream_routes,
-)
 from src.evaluation.metrics import regression_metrics
+from src.intermediary_features.registry import assemble_feature_sets, prepare_intermediary_banks
 from src.pipeline.config import ExperimentConfig
+from src.pipeline.run_options import RunOverrides, resolve_run_options
 from src.student.reasoning_regression import (
     fit_reasoning_regressors_full,
     predict_reasoning_regressors_full,
@@ -23,6 +20,14 @@ from src.student.reasoning_regression import (
 )
 from src.utils.artifact_io import timestamped_run_dir, write_csv, write_json, write_markdown
 from src.utils.paths import RUNS_DIR
+
+
+Logger = Callable[[str], None]
+
+
+def _log(logger: Logger | None, message: str) -> None:
+    if logger is not None:
+        logger(message)
 
 
 def _require_full_overlap(
@@ -38,16 +43,34 @@ def _require_full_overlap(
         missing = sorted(set(left_frame[on].astype(str)) - set(right_frame[on].astype(str)))
         preview = missing[:5]
         raise RuntimeError(
-            f"{right_name} is missing {len(missing)} ids required by {left_name}. "
-            f"Examples: {preview}"
+            f"{right_name} is missing {len(missing)} ids required by {left_name}. Examples: {preview}"
         )
     return merged
 
 
-def _evaluate_private_reasoning_predictions(
-    private_targets: pd.DataFrame,
-    private_predictions: pd.DataFrame,
+def _prefix_prediction_columns(frame: pd.DataFrame, *, feature_set_id: str) -> pd.DataFrame:
+    renamed = frame.copy()
+    renamed.columns = [
+        column if column == "founder_uuid" else f"{feature_set_id}__{column}"
+        for column in renamed.columns
+    ]
+    return renamed
+
+
+def _merge_prediction_tables(
+    current: pd.DataFrame | None,
+    incoming: pd.DataFrame,
+) -> pd.DataFrame:
+    if current is None:
+        return incoming
+    return current.merge(incoming, on="founder_uuid", how="outer", validate="one_to_one")
+
+
+def _evaluate_heldout_predictions(
     *,
+    feature_set_id: str,
+    heldout_targets: pd.DataFrame,
+    heldout_predictions: pd.DataFrame,
     target_columns: list[str],
     model_specs: list,
 ) -> pd.DataFrame:
@@ -56,208 +79,214 @@ def _evaluate_private_reasoning_predictions(
         for model_spec in model_specs:
             pred_column = f"{target_column}__{model_spec.model_id}"
             metrics = regression_metrics(
-                private_targets[target_column].to_numpy(dtype=float),
-                private_predictions[pred_column].to_numpy(dtype=float),
+                heldout_targets[target_column].to_numpy(dtype=float),
+                heldout_predictions[pred_column].to_numpy(dtype=float),
             )
             rows.append(
                 {
+                    "feature_set_id": feature_set_id,
                     "target_id": target_column,
                     "model_id": model_spec.model_id,
+                    "split_id": "heldout_overall",
                     **metrics,
                 }
             )
     return pd.DataFrame(rows)
 
 
-def run_distillation_experiment(config: ExperimentConfig) -> Path:
-    run_dir = timestamped_run_dir(RUNS_DIR / config.experiment_id, "distillation")
-    write_json(run_dir / "resolved_config.json", asdict(config))
+def run_distillation_experiment(
+    config: ExperimentConfig,
+    overrides: RunOverrides | None = None,
+    *,
+    logger: Logger | None = None,
+) -> Path:
+    resolved_run = resolve_run_options(config, overrides)
+    run_dir = timestamped_run_dir(RUNS_DIR / config.experiment_id, "reasoning_reconstruction")
 
+    write_json(run_dir / "resolved_config.json", asdict(config))
+    write_json(run_dir / "resolved_run_options.json", asdict(resolved_run))
+
+    _log(logger, "Loading VCBench public and held-out datasets.")
     raw_datasets = load_raw_datasets(
         Path(config.datasets.public_train_csv),
         Path(config.datasets.private_test_csv),
     )
-    input_features = build_input_features(
-        public_raw=raw_datasets.public_frame,
-        private_raw=raw_datasets.private_frame,
-        spec=config.input_features,
-    )
-    write_json(run_dir / "input_feature_manifest.json", input_features.manifest)
+
+    _log(logger, "Loading reasoning target bank.")
     reasoning_targets = load_reasoning_target_bank(
         config.reasoning_target_bank,
-        selected_targets=[item.target_id for item in config.reasoning_targets],
+        selected_targets=[item.target_id for item in resolved_run.reasoning_targets],
     )
     write_json(run_dir / "reasoning_target_manifest.json", target_manifest_payload(reasoning_targets))
 
-    public_feature_rows = _require_full_overlap(
-        raw_datasets.public_frame[["founder_uuid", "success"]],
-        input_features.public_frame,
-        on="founder_uuid",
-        left_name="public raw dataset",
-        right_name="public input features",
+    _log(logger, "Preparing intermediary feature banks.")
+    banks_by_id = prepare_intermediary_banks(
+        public_raw=raw_datasets.public_frame,
+        private_raw=raw_datasets.private_frame,
+        feature_specs=resolved_run.intermediary_features,
+        force_rebuild=resolved_run.force_rebuild_intermediary_features,
+        logger=logger,
     )
-    private_feature_rows = _require_full_overlap(
-        raw_datasets.private_frame[["founder_uuid"]],
-        input_features.private_frame,
-        on="founder_uuid",
-        left_name="private raw dataset",
-        right_name="private input features",
+    write_json(
+        run_dir / "intermediary_feature_manifests.json",
+        {feature_id: bank.manifest for feature_id, bank in banks_by_id.items()},
     )
 
-    public_model_rows = _require_full_overlap(
-        public_feature_rows,
+    feature_sets = assemble_feature_sets(
+        public_founder_ids=raw_datasets.public_frame["founder_uuid"],
+        private_founder_ids=raw_datasets.private_frame["founder_uuid"],
+        banks_by_id=banks_by_id,
+        feature_sets=resolved_run.feature_sets,
+    )
+    write_json(
+        run_dir / "feature_set_manifest.json",
+        {feature_set.feature_set_id: feature_set.manifest for feature_set in feature_sets},
+    )
+
+    public_target_rows = _require_full_overlap(
+        raw_datasets.public_frame[["founder_uuid"]],
         reasoning_targets.train_frame,
         on="founder_uuid",
-        left_name="public input features",
+        left_name="public raw dataset",
         right_name="public reasoning target bank",
     )
 
-    feature_columns = input_features.feature_columns
+    heldout_target_rows = None
+    if reasoning_targets.test_frame is not None:
+        heldout_target_rows = _require_full_overlap(
+            raw_datasets.private_frame[["founder_uuid"]],
+            reasoning_targets.test_frame,
+            on="founder_uuid",
+            left_name="held-out raw dataset",
+            right_name="held-out reasoning target bank",
+        )
+
     target_columns = reasoning_targets.train_target_columns
-    splits = build_public_cv_splits(
-        public_model_rows["success"],
+    splits = build_cv_splits(
+        len(public_target_rows),
         n_splits=config.cv.n_splits,
         shuffle=config.cv.shuffle,
         random_state=config.cv.random_state,
     )
 
-    reasoning_outputs = train_reasoning_regressors_oof(
-        public_model_rows[feature_columns],
-        public_model_rows[target_columns],
-        founder_ids=public_model_rows["founder_uuid"],
-        target_columns=target_columns,
-        model_specs=config.reasoning_models,
-        splits=splits,
-        random_state=config.cv.random_state,
-        scale_min=reasoning_targets.scale_min,
-        scale_max=reasoning_targets.scale_max,
-    )
-    write_csv(run_dir / "reasoning_oof_predictions.csv", reasoning_outputs.oof_predictions)
-    write_csv(run_dir / "reasoning_metrics.csv", reasoning_outputs.metrics)
+    combined_oof_predictions: pd.DataFrame | None = None
+    combined_heldout_predictions: pd.DataFrame | None = None
+    public_metric_frames: list[pd.DataFrame] = []
+    heldout_metric_frames: list[pd.DataFrame] = []
 
-    predicted_reasoning_by_model = {
-        model_spec.model_id: extract_predicted_reasoning_features(
-            reasoning_outputs.oof_predictions,
-            model_id=model_spec.model_id,
-        )[target_columns]
-        for model_spec in config.reasoning_models
-    }
+    for feature_set in feature_sets:
+        _log(logger, f"Training reasoning models for feature set '{feature_set.feature_set_id}'.")
+        public_feature_rows = _require_full_overlap(
+            public_target_rows[["founder_uuid"]],
+            feature_set.public_frame,
+            on="founder_uuid",
+            left_name=f"public reasoning targets for '{feature_set.feature_set_id}'",
+            right_name=f"public feature set '{feature_set.feature_set_id}'",
+        )
 
-    downstream_public = evaluate_public_downstream_routes(
-        base_features=public_model_rows[feature_columns],
-        labels=public_model_rows["success"],
-        true_reasoning=public_model_rows[target_columns],
-        predicted_reasoning_by_model=predicted_reasoning_by_model,
-        model_specs=config.downstream_models,
-        splits=splits,
-        random_state=config.cv.random_state,
-    )
-    write_csv(run_dir / "downstream_public_summary.csv", downstream_public.summary)
-    write_csv(run_dir / "downstream_public_fold_metrics.csv", downstream_public.fold_metrics)
-
-    promotion_status = {
-        "mode": config.promotion.mode,
-        "approved": config.promotion.approved,
-        "private_predictions_written": False,
-    }
-
-    if not config.promotion.approved:
-        write_json(run_dir / "promotion_status.json", promotion_status)
-        write_markdown(
-            run_dir / "run_summary.md",
-            "\n".join(
-                [
-                    "# Run Summary",
-                    "",
-                    "- Public-stage outputs were written successfully.",
-                    "- Promotion is manual and currently blocked.",
-                    "- Private reasoning and downstream prediction artifacts were not generated.",
-                ]
+        reasoning_outputs = train_reasoning_regressors_oof(
+            public_feature_rows[feature_set.feature_columns],
+            public_target_rows[target_columns],
+            founder_ids=public_feature_rows["founder_uuid"],
+            target_columns=target_columns,
+            model_specs=resolved_run.reasoning_models,
+            splits=splits,
+            random_state=config.cv.random_state,
+            scale_min=reasoning_targets.scale_min,
+            scale_max=reasoning_targets.scale_max,
+        )
+        public_metrics = reasoning_outputs.metrics.copy()
+        public_metrics.insert(0, "feature_set_id", feature_set.feature_set_id)
+        public_metric_frames.append(public_metrics)
+        combined_oof_predictions = _merge_prediction_tables(
+            combined_oof_predictions,
+            _prefix_prediction_columns(
+                reasoning_outputs.oof_predictions,
+                feature_set_id=feature_set.feature_set_id,
             ),
         )
-        return run_dir
 
-    fitted_models = fit_reasoning_regressors_full(
-        public_model_rows[feature_columns],
-        public_model_rows[target_columns],
-        target_columns=target_columns,
-        model_specs=config.reasoning_models,
-        random_state=config.cv.random_state,
-    )
-    private_reasoning_predictions = predict_reasoning_regressors_full(
-        private_feature_rows[feature_columns],
-        founder_ids=private_feature_rows["founder_uuid"],
-        target_columns=target_columns,
-        model_specs=config.reasoning_models,
-        fitted_models=fitted_models,
-        scale_min=reasoning_targets.scale_min,
-        scale_max=reasoning_targets.scale_max,
-    )
-    write_csv(run_dir / "reasoning_private_predictions.csv", private_reasoning_predictions)
-
-    private_reasoning_metrics = None
-    if reasoning_targets.test_frame is not None:
-        private_targets = _require_full_overlap(
-            private_feature_rows[["founder_uuid"]],
-            reasoning_targets.test_frame,
+        heldout_feature_rows = _require_full_overlap(
+            raw_datasets.private_frame[["founder_uuid"]],
+            feature_set.private_frame,
             on="founder_uuid",
-            left_name="private input features",
-            right_name="held-out reasoning target bank",
+            left_name=f"held-out ids for '{feature_set.feature_set_id}'",
+            right_name=f"held-out feature set '{feature_set.feature_set_id}'",
         )
-        private_reasoning_metrics = _evaluate_private_reasoning_predictions(
-            private_targets,
-            private_reasoning_predictions,
+        fitted_models = fit_reasoning_regressors_full(
+            public_feature_rows[feature_set.feature_columns],
+            public_target_rows[target_columns],
             target_columns=target_columns,
-            model_specs=config.reasoning_models,
+            model_specs=resolved_run.reasoning_models,
+            random_state=config.cv.random_state,
         )
-        write_csv(run_dir / "reasoning_private_metrics.csv", private_reasoning_metrics)
+        heldout_predictions = predict_reasoning_regressors_full(
+            heldout_feature_rows[feature_set.feature_columns],
+            founder_ids=heldout_feature_rows["founder_uuid"],
+            target_columns=target_columns,
+            model_specs=resolved_run.reasoning_models,
+            fitted_models=fitted_models,
+            scale_min=reasoning_targets.scale_min,
+            scale_max=reasoning_targets.scale_max,
+        )
+        combined_heldout_predictions = _merge_prediction_tables(
+            combined_heldout_predictions,
+            _prefix_prediction_columns(
+                heldout_predictions,
+                feature_set_id=feature_set.feature_set_id,
+            ),
+        )
 
-    predicted_private_reasoning_by_model = {
-        model_spec.model_id: extract_predicted_reasoning_features(
-            private_reasoning_predictions,
-            model_id=model_spec.model_id,
-        )[target_columns]
-        for model_spec in config.reasoning_models
-    }
-    true_reasoning_private = None
-    if reasoning_targets.test_frame is not None:
-        true_reasoning_private = _require_full_overlap(
-            private_feature_rows[["founder_uuid"]],
-            reasoning_targets.test_frame,
-            on="founder_uuid",
-            left_name="private input features",
-            right_name="held-out reasoning target bank",
-        )[target_columns]
+        if heldout_target_rows is not None:
+            heldout_metric_frames.append(
+                _evaluate_heldout_predictions(
+                    feature_set_id=feature_set.feature_set_id,
+                    heldout_targets=heldout_target_rows,
+                    heldout_predictions=heldout_predictions,
+                    target_columns=target_columns,
+                    model_specs=resolved_run.reasoning_models,
+                )
+            )
 
-    downstream_private_predictions = predict_private_downstream_routes(
-        public_base_features=public_model_rows[feature_columns],
-        public_labels=public_model_rows["success"],
-        private_founder_ids=private_feature_rows["founder_uuid"],
-        private_base_features=private_feature_rows[feature_columns],
-        true_reasoning_public=public_model_rows[target_columns],
-        true_reasoning_private=true_reasoning_private,
-        predicted_reasoning_public_by_model=predicted_reasoning_by_model,
-        predicted_reasoning_private_by_model=predicted_private_reasoning_by_model,
-        model_specs=config.downstream_models,
-        random_state=config.cv.random_state,
+    write_csv(
+        run_dir / "reasoning_oof_predictions.csv",
+        combined_oof_predictions if combined_oof_predictions is not None else pd.DataFrame({"founder_uuid": []}),
     )
-    write_csv(run_dir / "downstream_private_predictions.csv", downstream_private_predictions)
-
-    promotion_status["private_predictions_written"] = True
-    write_json(run_dir / "promotion_status.json", promotion_status)
+    write_csv(
+        run_dir / "reasoning_metrics.csv",
+        pd.concat(public_metric_frames, ignore_index=True) if public_metric_frames else pd.DataFrame(),
+    )
+    write_csv(
+        run_dir / "reasoning_heldout_predictions.csv",
+        combined_heldout_predictions
+        if combined_heldout_predictions is not None
+        else pd.DataFrame({"founder_uuid": []}),
+    )
+    if heldout_metric_frames:
+        write_csv(
+            run_dir / "reasoning_heldout_metrics.csv",
+            pd.concat(heldout_metric_frames, ignore_index=True),
+        )
 
     summary_lines = [
         "# Run Summary",
         "",
-        f"- Feature count: {len(feature_columns)}",
-        f"- Configured reasoning targets: {len(target_columns)}",
-        f"- Public reasoning metric rows: {len(reasoning_outputs.metrics)}",
-        f"- Public downstream summary rows: {len(downstream_public.summary)}",
-        "- Private reasoning predictions were generated.",
+        f"- Selected reasoning targets: {len(target_columns)}",
+        f"- Intermediary banks prepared: {len(banks_by_id)}",
+        f"- Feature-set comparisons run: {len(feature_sets)}",
+        f"- Reasoning models run per target: {len(resolved_run.reasoning_models)}",
+        f"- OOF prediction columns written: {0 if combined_oof_predictions is None else len(combined_oof_predictions.columns) - 1}",
+        f"- Held-out prediction columns written: {0 if combined_heldout_predictions is None else len(combined_heldout_predictions.columns) - 1}",
     ]
-    if private_reasoning_metrics is not None:
-        summary_lines.append("- Private reasoning agreement metrics were generated.")
-    else:
-        summary_lines.append("- Private reasoning agreement metrics were skipped because no private target tables were configured.")
     write_markdown(run_dir / "run_summary.md", "\n".join(summary_lines))
+    _log(logger, f"Run complete. Artifacts written to {run_dir}.")
     return run_dir
+
+
+def run_reasoning_reconstruction(
+    config: ExperimentConfig,
+    overrides: RunOverrides | None = None,
+    *,
+    logger: Logger | None = None,
+) -> Path:
+    return run_distillation_experiment(config, overrides, logger=logger)

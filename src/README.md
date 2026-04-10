@@ -1,12 +1,15 @@
 # Source
 
-Core code lives here and is split by responsibility:
+Active code layout:
 
-- `teacher/` for teacher policy induction and scoring
-- `student/` for distilled model training and inference
-- `downstream/` for founder-success route training and prediction
-- `data/` for raw-data loaders, input-feature builders, and target-bank loading
-- `evaluation/` for metrics and threshold logic
-- `llm_engineering/` for prompt-driven rule generation adapters and caches
-- `pipeline/` for config parsing and end-to-end orchestration
-- `utils/` for shared utilities
+- `data/` for raw-data loading and target-bank contracts
+- `intermediary_features/` for reusable feature-bank generation and storage
+- `student/` for reasoning model builders and training loops
+- `pipeline/` for config parsing, run overrides, and orchestration
+- `gui/` for the Tkinter launcher
+- `llm_engineering/` for the scaffolded future prompt-driven feature family
+- `utils/` for paths, IO, dependency guards, and placeholders
+
+Dormant code:
+
+- `downstream/` is retained only as future work and is not part of the active pipeline

@@ -1,12 +1,8 @@
 # Docs
 
-Store human-readable outputs here, including:
+Human-readable project memory lives here.
 
-- project summaries
-- evaluation reports
-- interpreted findings derived from `data/` or `tmp/`
-
-Current planning and architecture docs:
+Current core docs:
 
 - [scoping_summary.md](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/docs/scoping_summary.md)
 - [implementation_plan.md](/C:/Users/joelb/OneDrive/Vela_partnerships_project/Teacher_student_project/Vela_teacher_student_llm_reasoning/docs/implementation_plan.md)

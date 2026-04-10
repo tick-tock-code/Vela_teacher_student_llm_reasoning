@@ -23,9 +23,8 @@ def load_public_dataset(
     frame = read_table(path)
     frame = rename_identifier_column(frame, source_id_column=id_column, target_id_column="founder_uuid")
     frame = ensure_row_index(frame)
-    if label_column not in frame.columns:
-        raise RuntimeError(f"Public dataset is missing label column '{label_column}': {path}")
-    frame[label_column] = frame[label_column].astype(int)
+    if label_column in frame.columns:
+        frame[label_column] = frame[label_column].astype(int)
     validate_unique_ids(frame, id_column="founder_uuid")
     return frame
 

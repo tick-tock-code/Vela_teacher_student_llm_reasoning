@@ -1,12 +1,9 @@
 {
   "experiment_id": "teacher_student_distillation_v1",
-  "description": "Teacher-student regression pipeline for predicting policy reasoning targets from raw founder inputs.",
+  "description": "Reasoning-reconstruction pipeline for predicting selected policy targets from reusable VCBench intermediary feature banks.",
   "datasets": {
     "public_train_csv": "data/VCBench_data/vcbench_final_public.csv",
     "private_test_csv": "data/VCBench_data/vcbench_final_private (success column removed) - vcbench_final_private.csv"
-  },
-  "input_features": {
-    "kind": "founder_baseline_v1"
   },
   "reasoning_target_bank": {
     "train_path": "data/reasoning_feature_targets/policy_features.csv",
@@ -60,23 +57,55 @@
       "kind": "xgb1_regressor"
     }
   ],
-  "downstream_models": [
+  "intermediary_features": [
     {
-      "model_id": "lr_classifier",
-      "kind": "lr_classifier"
+      "feature_id": "mirror",
+      "kind": "vcbench_mirror_baseline_v1",
+      "enabled": true
     },
     {
-      "model_id": "xgb1_classifier",
-      "kind": "xgb1_classifier"
+      "feature_id": "sentence_prose",
+      "kind": "sentence_transformer_prose_v1",
+      "enabled": true,
+      "embedding_model_name": "sentence-transformers/all-MiniLM-L6-v2"
+    },
+    {
+      "feature_id": "sentence_structured",
+      "kind": "sentence_transformer_structured_v1",
+      "enabled": true,
+      "embedding_model_name": "sentence-transformers/all-MiniLM-L6-v2"
+    },
+    {
+      "feature_id": "llm_engineered",
+      "kind": "llm_engineered_v1",
+      "enabled": false
+    }
+  ],
+  "feature_sets": [
+    {
+      "feature_set_id": "mirror",
+      "feature_ids": ["mirror"]
+    },
+    {
+      "feature_set_id": "sentence_prose",
+      "feature_ids": ["sentence_prose"]
+    },
+    {
+      "feature_set_id": "sentence_structured",
+      "feature_ids": ["sentence_structured"]
+    },
+    {
+      "feature_set_id": "sentence_prose_plus_structured",
+      "feature_ids": ["sentence_prose", "sentence_structured"]
+    },
+    {
+      "feature_set_id": "mirror_plus_sentence_prose_plus_structured",
+      "feature_ids": ["mirror", "sentence_prose", "sentence_structured"]
     }
   ],
   "cv": {
     "n_splits": 3,
     "shuffle": true,
     "random_state": 42
-  },
-  "promotion": {
-    "mode": "manual",
-    "approved": false
   }
 }

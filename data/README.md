@@ -1,15 +1,11 @@
 # Data
 
-Store canonical, reusable datasets here.
+`data/` is for reusable project assets.
 
-Guidelines:
+Current layout:
 
-- keep raw datasets and teacher target tables explicit
-- version data artifacts when necessary
-- do not store temporary or partially generated outputs here
+- `VCBench_data/`: raw founder inputs
+- `reasoning_feature_targets/`: teacher policy targets
+- `intermediary_features/`: reusable generated feature banks
 
-Recommended layout:
-
-- `VCBench_data/` for the current raw public/private founder tables
-- `reasoning_feature_targets/` for policy reasoning target tables
-- future reusable additions should follow the same pattern: committed, named, and non-temporary
+Do not put disposable run artifacts here. Those belong in `tmp/`.
