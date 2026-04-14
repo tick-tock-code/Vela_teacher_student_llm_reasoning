@@ -1,17 +1,23 @@
 # Repo Architecture
 
-This is the canonical folder layout for the reasoning-reconstruction project.
+This is the canonical folder layout after the Feature Repository integration.
 
 ```text
 .
+|-- Feature Repository/
+|   |-- hq_baseline/
+|   |-- lambda_policies/
+|   |-- llm_engineering/
+|   |-- policies/
+|   `-- splits/
 |-- data/
 |   |-- VCBench_data/
-|   |-- reasoning_feature_targets/
 |   `-- intermediary_features/
 |-- docs/
 |-- experiments/
 |-- src/
 |   |-- data/
+|   |-- downstream/
 |   |-- evaluation/
 |   |-- gui/
 |   |-- intermediary_features/
@@ -19,26 +25,43 @@ This is the canonical folder layout for the reasoning-reconstruction project.
 |   |-- pipeline/
 |   |-- student/
 |   |-- teacher/
-|   |-- downstream/   # dormant future path only
 |   `-- utils/
 |-- tests/
 `-- tmp/
 ```
 
-## Folder Rules
+## Ownership Rules
 
-- `data/` stores reusable committed inputs and reusable generated feature banks
-- `tmp/` stores disposable run artifacts
-- `docs/` stores project memory and architecture decisions
-- `experiments/` stores committed experiment definitions
-- `src/intermediary_features/` owns feature-bank generation and caching logic
-- `src/pipeline/` owns config parsing, overrides, and orchestration
-- `src/gui/` owns the launcher surface
+- `Feature Repository/` stores the authoritative benchmark feature banks, policy targets, labels, and canonical split order.
+- `data/VCBench_data/` stores raw public and held-out VCBench founder inputs.
+- `data/intermediary_features/` stores generated reusable banks such as sentence-transformer embeddings.
+- `tmp/` stores disposable run artifacts.
+- `experiments/` stores committed experiment definitions only.
+- `docs/` stores the project contract, workflow notes, and architecture decisions.
 
-## Important Boundary
+## Code Boundaries
 
-There is one active modeling path:
+- `src/data/` owns loading and alignment logic.
+- `src/intermediary_features/` owns creation and caching of generated feature banks.
+- `src/student/` owns target-model training loops.
+- `src/pipeline/` owns configuration, run-mode selection, and orchestration.
+- `src/gui/` owns the Tkinter launcher.
 
-- VCBench raw data -> intermediary feature banks -> per-target reasoning regressors -> optional held-out reasoning predictions
+## Active Modeling Paths
 
-Anything outside that path is dormant, including founder-success prediction.
+`reproduction_mode`:
+
+- `Feature Repository/` banks plus split files
+- benchmark success-prediction reproduction
+
+`reasoning_distillation_mode`:
+
+- repository banks plus generated intermediary banks
+- teacher target family from `Feature Repository/policies/`
+- one student model per target
+
+## Guarded Or Dormant Areas
+
+- `src/downstream/` is no longer the active contract for default runs
+- custom LLM-engineered intermediary generation remains scaffolded until prompt assets exist
+- the older `data/reasoning_feature_targets/` workflow is no longer the active source of truth

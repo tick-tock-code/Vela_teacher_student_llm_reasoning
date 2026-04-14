@@ -3,13 +3,13 @@ from __future__ import annotations
 import argparse
 
 from src.pipeline.config import load_experiment_config
-from src.pipeline.distillation import run_reasoning_reconstruction
+from src.pipeline.distillation import run_pipeline
 from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the reasoning-reconstruction pipeline on VCBench."
+        description="Run the Feature Repository reproduction or reasoning-distillation pipeline."
     )
     parser.add_argument(
         "--config",
@@ -17,46 +17,83 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the experiment config JSON.",
     )
     parser.add_argument(
-        "--run-reasoning-predictions",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Run the reasoning reconstruction pipeline.",
+        "--run-mode",
+        choices=["reproduction_mode", "reasoning_distillation_mode", "model_testing_mode"],
+        help="Pipeline mode. Defaults to the config default.",
     )
     parser.add_argument(
-        "--run-heldout-reasoning-predictions",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Opt in to held-out reasoning prediction and held-out agreement reporting.",
+        "--target-family",
+        help="Optional target family override for reasoning distillation (v25_policies, taste_policies, v25_and_taste).",
     )
     parser.add_argument(
-        "--run-success-predictions",
+        "--heldout-evaluation",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Dormant future option. This currently fails immediately if enabled.",
+        default=None,
+        help="Opt in or out of held-out evaluation for reasoning-distillation mode.",
     )
     parser.add_argument(
-        "--active-intermediary-features",
+        "--active-feature-banks",
         nargs="*",
-        help="Optional subset of intermediary feature ids to activate.",
+        help="Optional subset of repository/intermediary feature banks for reasoning distillation.",
     )
     parser.add_argument(
         "--force-rebuild-intermediary-features",
         action="store_true",
-        help="Rebuild intermediary feature banks even if cached artifacts already exist.",
-    )
-    parser.add_argument(
-        "--reasoning-targets",
-        nargs="*",
-        help="Optional subset of configured reasoning targets to run.",
+        help="Rebuild sentence-transformer intermediary banks even if cached artifacts already exist.",
     )
     parser.add_argument(
         "--reasoning-models",
         nargs="*",
-        help="Optional subset of configured reasoning model ids to run.",
+        help="Optional subset of distillation model ids to run.",
     )
     parser.add_argument(
         "--embedding-model",
         help="Override the embedding model name for sentence-transformer intermediary features.",
+    )
+    parser.add_argument(
+        "--repeat-cv-with-new-seeds",
+        action="store_true",
+        help="Run distillation CV repeatedly with different random seeds and average metrics.",
+    )
+    parser.add_argument(
+        "--cv-seed-repeat-count",
+        type=int,
+        help="Number of repeated stratified CV runs when --repeat-cv-with-new-seeds is enabled.",
+    )
+    parser.add_argument(
+        "--nested-hyperparameter-cv",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable nested hyperparameter tuning CV (shared across reproduction and distillation).",
+    )
+    parser.add_argument(
+        "--save-reasoning-predictions",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable writing reasoning OOF/held-out prediction CSVs.",
+    )
+    parser.add_argument(
+        "--candidate-feature-sets",
+        nargs="*",
+        help="Feature-set ids used by model_testing_mode screening/advanced runs.",
+    )
+    parser.add_argument(
+        "--model-families",
+        nargs="*",
+        help="Model families for model_testing_mode: linear_l2, xgb1, mlp, elasticnet, randomforest.",
+    )
+    parser.add_argument(
+        "--run-advanced-models",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="In model_testing_mode, run stage-B advanced model comparisons on shortlisted feature sets.",
+    )
+    parser.add_argument(
+        "--distillation-nested-sweep",
+        dest="nested_hyperparameter_cv",
+        action="store_const",
+        const=True,
+        help=argparse.SUPPRESS,
     )
     return parser
 
@@ -65,33 +102,43 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
     args = build_parser().parse_args(argv)
     return RunOverrides(
         config_path=args.config,
-        run_reasoning_predictions=bool(args.run_reasoning_predictions),
-        run_heldout_reasoning_predictions=bool(args.run_heldout_reasoning_predictions),
-        run_success_predictions=bool(args.run_success_predictions),
-        active_intermediary_features=(
-            [str(item) for item in args.active_intermediary_features]
-            if args.active_intermediary_features
+        run_mode=str(args.run_mode) if args.run_mode else None,
+        target_family=str(args.target_family) if args.target_family else None,
+        heldout_evaluation=args.heldout_evaluation,
+        active_feature_banks=(
+            [str(item) for item in args.active_feature_banks]
+            if args.active_feature_banks
             else None
         ),
         force_rebuild_intermediary_features=bool(args.force_rebuild_intermediary_features),
-        reasoning_targets=(
-            [str(item) for item in args.reasoning_targets]
-            if args.reasoning_targets
-            else None
-        ),
         reasoning_models=(
             [str(item) for item in args.reasoning_models]
             if args.reasoning_models
             else None
         ),
         embedding_model_name=str(args.embedding_model) if args.embedding_model else None,
+        repeat_cv_with_new_seeds=bool(args.repeat_cv_with_new_seeds),
+        cv_seed_repeat_count=args.cv_seed_repeat_count,
+        distillation_nested_sweep=args.nested_hyperparameter_cv,
+        save_reasoning_predictions=args.save_reasoning_predictions,
+        candidate_feature_sets=(
+            [str(item) for item in args.candidate_feature_sets]
+            if args.candidate_feature_sets
+            else None
+        ),
+        model_families=(
+            [str(item) for item in args.model_families]
+            if args.model_families
+            else None
+        ),
+        run_advanced_models=args.run_advanced_models,
     )
 
 
 def main(argv: list[str] | None = None) -> None:
     overrides = parse_run_overrides(argv)
     config = load_experiment_config(overrides.config_path)
-    run_dir = run_reasoning_reconstruction(config, overrides)
+    run_dir = run_pipeline(config, overrides)
     print(f"Wrote run artifacts to {run_dir}")
 
 

@@ -6,16 +6,48 @@ from src.utils.artifact_io import read_json
 from src.utils.paths import resolve_repo_path
 
 
+SUPPORTED_RUN_MODES = {
+    "reproduction_mode",
+    "reasoning_distillation_mode",
+    "model_testing_mode",
+}
+
 SUPPORTED_INTERMEDIARY_FEATURE_KINDS = {
-    "vcbench_mirror_baseline_v1",
     "sentence_transformer_prose_v1",
     "sentence_transformer_structured_v1",
     "llm_engineered_v1",
 }
 
-SUPPORTED_REASONING_MODEL_KINDS = {
+SUPPORTED_DISTILLATION_MODEL_KINDS = {
     "ridge",
     "xgb1_regressor",
+    "logreg_classifier",
+    "xgb1_classifier",
+    "mlp_regressor",
+    "elasticnet_regressor",
+    "randomforest_regressor",
+    "mlp_classifier",
+    "elasticnet_logreg_classifier",
+    "randomforest_classifier",
+}
+
+SUPPORTED_REPRODUCTION_MODEL_KINDS = {
+    "nested_l2_logreg",
+    "xgb_joel_classifier",
+    "xgb_autoresearch_classifier",
+}
+
+SUPPORTED_TARGET_TASK_KINDS = {
+    "regression",
+    "classification",
+}
+
+SUPPORTED_MODEL_TESTING_FAMILIES = {
+    "linear_l2",
+    "xgb1",
+    "mlp",
+    "elasticnet",
+    "randomforest",
 }
 
 
@@ -26,8 +58,37 @@ class DatasetPaths:
 
 
 @dataclass(frozen=True)
+class FeatureRepositoryPaths:
+    root_dir: str
+    labels_path: str
+    train_uuids_path: str
+    test_uuids_path: str
+
+
+@dataclass(frozen=True)
+class DefaultRunSpec:
+    run_mode: str
+    target_family: str
+    heldout_evaluation: bool
+
+
+@dataclass(frozen=True)
+class RepositoryFeatureBankSpec:
+    feature_bank_id: str
+    train_path: str
+    test_path: str
+    source_id_column: str
+    enabled: bool
+    feature_prefixes: list[str]
+    exclude_columns: list[str]
+    label_column: str | None
+    all_features_binary: bool
+    binary_feature_columns: list[str]
+
+
+@dataclass(frozen=True)
 class IntermediaryFeatureSpec:
-    feature_id: str
+    feature_bank_id: str
     kind: str
     enabled: bool
     embedding_model_name: str | None
@@ -36,30 +97,28 @@ class IntermediaryFeatureSpec:
 @dataclass(frozen=True)
 class FeatureSetSpec:
     feature_set_id: str
-    feature_ids: list[str]
+    feature_bank_ids: list[str]
 
 
 @dataclass(frozen=True)
-class ReasoningTargetBankSpec:
+class TargetFamilySpec:
+    family_id: str
     train_path: str
     test_path: str | None
     source_id_column: str
     target_id_column: str
-    target_regex: str
-    scale_min: float
-    scale_max: float
-    prediction_mode: str
+    target_prefixes: list[str]
+    task_kind: str
+    scale_min: float | None
+    scale_max: float | None
+    enabled_by_default: bool
 
 
 @dataclass(frozen=True)
-class ReasoningTargetSpec:
-    target_id: str
-
-
-@dataclass(frozen=True)
-class ModelSpec:
+class DistillationModelSpec:
     model_id: str
     kind: str
+    supported_task_kinds: list[str]
 
 
 @dataclass(frozen=True)
@@ -70,121 +129,328 @@ class CVSpec:
 
 
 @dataclass(frozen=True)
+class ThresholdGridSpec:
+    start: float
+    stop: float
+    step: float
+
+
+@dataclass(frozen=True)
+class LambdaRankingSpec:
+    c: float
+    max_iter: int
+    solver: str
+    class_weight: str
+    random_state: int
+
+
+@dataclass(frozen=True)
+class ReproductionExperimentSpec:
+    experiment_id: str
+    title: str
+    feature_bank_ids: list[str]
+    training_pool: str
+    model_kind: str
+    use_exit_override: bool
+    lambda_top_k: int | None
+    lambda_rank_base_bank_id: str | None
+    standardize: bool
+
+
+@dataclass(frozen=True)
+class ReproductionSpec:
+    outer_cv: CVSpec
+    inner_cv: CVSpec
+    threshold_grid: ThresholdGridSpec
+    logistic_c_grid: list[float]
+    lambda_ranking: LambdaRankingSpec
+    experiments: list[ReproductionExperimentSpec]
+
+
+@dataclass(frozen=True)
+class ModelTestingSpec:
+    candidate_feature_sets: list[str]
+    default_model_families: list[str]
+    run_advanced_models_default: bool
+    screening_repeat_cv_count: int
+    screening_score_delta: float
+    max_recommended_feature_sets: int
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     experiment_id: str
     description: str
     datasets: DatasetPaths
-    reasoning_target_bank: ReasoningTargetBankSpec
-    reasoning_targets: list[ReasoningTargetSpec]
-    reasoning_models: list[ModelSpec]
+    feature_repository: FeatureRepositoryPaths
+    defaults: DefaultRunSpec
+    repository_feature_banks: list[RepositoryFeatureBankSpec]
     intermediary_features: list[IntermediaryFeatureSpec]
-    feature_sets: list[FeatureSetSpec]
-    cv: CVSpec
+    distillation_feature_sets: list[FeatureSetSpec]
+    target_families: list[TargetFamilySpec]
+    distillation_models: list[DistillationModelSpec]
+    reproduction: ReproductionSpec
+    distillation_cv: CVSpec
+    model_testing: ModelTestingSpec
 
 
-def _validate_reasoning_target_bank_spec(spec: ReasoningTargetBankSpec) -> None:
-    if spec.prediction_mode != "regression":
+def _validate_cv_spec(label: str, spec: CVSpec) -> None:
+    if spec.n_splits < 2:
+        raise RuntimeError(f"{label} requires n_splits >= 2.")
+
+
+def _validate_defaults(
+    defaults: DefaultRunSpec,
+    *,
+    target_family_ids: set[str],
+) -> None:
+    if defaults.run_mode not in SUPPORTED_RUN_MODES:
+        raise RuntimeError(f"Unsupported defaults.run_mode '{defaults.run_mode}'.")
+    if defaults.target_family not in target_family_ids:
         raise RuntimeError(
-            f"Unsupported reasoning_target_bank.prediction_mode '{spec.prediction_mode}'. "
-            "v1 only supports 'regression'."
+            f"defaults.target_family '{defaults.target_family}' is not declared in target_families."
         )
-    if spec.scale_min >= spec.scale_max:
-        raise RuntimeError("reasoning_target_bank requires scale_min < scale_max.")
-    if not spec.target_regex.strip():
-        raise RuntimeError("reasoning_target_bank requires a non-empty target_regex.")
 
 
-def _validate_reasoning_targets(specs: list[ReasoningTargetSpec]) -> None:
+def _validate_repository_feature_banks(specs: list[RepositoryFeatureBankSpec]) -> None:
     if not specs:
-        raise RuntimeError("At least one reasoning target must be declared.")
+        raise RuntimeError("At least one repository feature bank must be declared.")
     seen: set[str] = set()
     for spec in specs:
-        target_id = spec.target_id.strip()
-        if not target_id:
-            raise RuntimeError("Reasoning target entries require a non-empty target_id.")
-        if target_id in seen:
-            raise RuntimeError(f"Duplicate reasoning target '{target_id}' in config.")
-        seen.add(target_id)
-
-
-def _validate_reasoning_models(specs: list[ModelSpec]) -> None:
-    if not specs:
-        raise RuntimeError("At least one reasoning model must be declared.")
-    seen: set[str] = set()
-    for spec in specs:
-        if not spec.model_id.strip():
-            raise RuntimeError("Reasoning model entries require a non-empty model_id.")
-        if spec.model_id in seen:
-            raise RuntimeError(f"Duplicate reasoning model_id '{spec.model_id}' in config.")
-        if spec.kind not in SUPPORTED_REASONING_MODEL_KINDS:
-            raise RuntimeError(f"Unsupported reasoning model kind '{spec.kind}'.")
-        seen.add(spec.model_id)
+        feature_bank_id = spec.feature_bank_id.strip()
+        if not feature_bank_id:
+            raise RuntimeError("repository_feature_banks entries require a non-empty feature_bank_id.")
+        if feature_bank_id in seen:
+            raise RuntimeError(f"Duplicate repository feature_bank_id '{feature_bank_id}'.")
+        seen.add(feature_bank_id)
 
 
 def _validate_intermediary_features(specs: list[IntermediaryFeatureSpec]) -> None:
-    if not specs:
-        raise RuntimeError("At least one intermediary feature builder must be declared.")
     seen: set[str] = set()
     for spec in specs:
-        if not spec.feature_id.strip():
-            raise RuntimeError("Intermediary feature entries require a non-empty feature_id.")
-        if spec.feature_id in seen:
-            raise RuntimeError(f"Duplicate intermediary feature_id '{spec.feature_id}' in config.")
+        feature_bank_id = spec.feature_bank_id.strip()
+        if not feature_bank_id:
+            raise RuntimeError("intermediary_features entries require a non-empty feature_bank_id.")
+        if feature_bank_id in seen:
+            raise RuntimeError(f"Duplicate intermediary feature_bank_id '{feature_bank_id}'.")
         if spec.kind not in SUPPORTED_INTERMEDIARY_FEATURE_KINDS:
             raise RuntimeError(f"Unsupported intermediary feature kind '{spec.kind}'.")
         if spec.kind.startswith("sentence_transformer") and not spec.embedding_model_name:
             raise RuntimeError(
-                f"Intermediary feature '{spec.feature_id}' requires embedding_model_name."
+                f"Intermediary feature '{feature_bank_id}' requires embedding_model_name."
             )
-        seen.add(spec.feature_id)
+        seen.add(feature_bank_id)
 
 
 def _validate_feature_sets(
     specs: list[FeatureSetSpec],
     *,
-    available_feature_ids: set[str],
+    available_feature_bank_ids: set[str],
 ) -> None:
     if not specs:
-        raise RuntimeError("At least one feature-set combination must be declared.")
+        raise RuntimeError("At least one distillation feature set must be declared.")
     seen: set[str] = set()
     for spec in specs:
         feature_set_id = spec.feature_set_id.strip()
         if not feature_set_id:
-            raise RuntimeError("Feature-set entries require a non-empty feature_set_id.")
+            raise RuntimeError("distillation_feature_sets entries require a non-empty feature_set_id.")
         if feature_set_id in seen:
-            raise RuntimeError(f"Duplicate feature_set_id '{feature_set_id}' in config.")
-        if not spec.feature_ids:
-            raise RuntimeError(f"Feature set '{feature_set_id}' must include at least one feature_id.")
-        missing = [feature_id for feature_id in spec.feature_ids if feature_id not in available_feature_ids]
+            raise RuntimeError(f"Duplicate distillation feature_set_id '{feature_set_id}'.")
+        if not spec.feature_bank_ids:
+            raise RuntimeError(f"Feature set '{feature_set_id}' must include at least one feature_bank_id.")
+        missing = [
+            feature_bank_id
+            for feature_bank_id in spec.feature_bank_ids
+            if feature_bank_id not in available_feature_bank_ids
+        ]
         if missing:
             raise RuntimeError(
-                f"Feature set '{feature_set_id}' references unknown intermediary features: {missing}"
+                f"Feature set '{feature_set_id}' references unknown feature banks: {missing}"
             )
         seen.add(feature_set_id)
+
+
+def _validate_target_families(specs: list[TargetFamilySpec]) -> None:
+    if not specs:
+        raise RuntimeError("At least one target family must be declared.")
+    seen: set[str] = set()
+    for spec in specs:
+        family_id = spec.family_id.strip()
+        if not family_id:
+            raise RuntimeError("target_families entries require a non-empty family_id.")
+        if family_id in seen:
+            raise RuntimeError(f"Duplicate target family '{family_id}'.")
+        if spec.task_kind not in SUPPORTED_TARGET_TASK_KINDS:
+            raise RuntimeError(
+                f"Target family '{family_id}' has unsupported task_kind '{spec.task_kind}'."
+            )
+        if not spec.target_prefixes:
+            raise RuntimeError(f"Target family '{family_id}' must declare target_prefixes.")
+        if spec.task_kind == "regression":
+            if spec.scale_min is None or spec.scale_max is None:
+                raise RuntimeError(
+                    f"Regression target family '{family_id}' requires scale_min and scale_max."
+                )
+            if spec.scale_min >= spec.scale_max:
+                raise RuntimeError(
+                    f"Regression target family '{family_id}' requires scale_min < scale_max."
+                )
+        seen.add(family_id)
+
+
+def _validate_distillation_models(specs: list[DistillationModelSpec]) -> None:
+    if not specs:
+        raise RuntimeError("At least one distillation model must be declared.")
+    seen: set[str] = set()
+    for spec in specs:
+        model_id = spec.model_id.strip()
+        if not model_id:
+            raise RuntimeError("distillation_models entries require a non-empty model_id.")
+        if model_id in seen:
+            raise RuntimeError(f"Duplicate distillation model_id '{model_id}'.")
+        if spec.kind not in SUPPORTED_DISTILLATION_MODEL_KINDS:
+            raise RuntimeError(f"Unsupported distillation model kind '{spec.kind}'.")
+        if not spec.supported_task_kinds:
+            raise RuntimeError(
+                f"Distillation model '{model_id}' must declare supported_task_kinds."
+            )
+        unsupported = [
+            task_kind
+            for task_kind in spec.supported_task_kinds
+            if task_kind not in SUPPORTED_TARGET_TASK_KINDS
+        ]
+        if unsupported:
+            raise RuntimeError(
+                f"Distillation model '{model_id}' has unsupported task kinds: {unsupported}"
+            )
+        seen.add(model_id)
+
+
+def _validate_reproduction(
+    spec: ReproductionSpec,
+    *,
+    available_feature_bank_ids: set[str],
+) -> None:
+    _validate_cv_spec("reproduction.outer_cv", spec.outer_cv)
+    _validate_cv_spec("reproduction.inner_cv", spec.inner_cv)
+    if not spec.logistic_c_grid:
+        raise RuntimeError("reproduction.logistic_c_grid must contain at least one value.")
+    if spec.threshold_grid.step <= 0:
+        raise RuntimeError("reproduction.threshold_grid.step must be > 0.")
+    if spec.threshold_grid.start >= spec.threshold_grid.stop:
+        raise RuntimeError("reproduction.threshold_grid requires start < stop.")
+    if not spec.experiments:
+        raise RuntimeError("At least one reproduction experiment must be declared.")
+
+    seen: set[str] = set()
+    for experiment in spec.experiments:
+        experiment_id = experiment.experiment_id.strip()
+        if not experiment_id:
+            raise RuntimeError("reproduction.experiments entries require a non-empty experiment_id.")
+        if experiment_id in seen:
+            raise RuntimeError(f"Duplicate reproduction experiment_id '{experiment_id}'.")
+        if not experiment.feature_bank_ids:
+            raise RuntimeError(
+                f"Reproduction experiment '{experiment_id}' must declare feature_bank_ids."
+            )
+        missing = [
+            feature_bank_id
+            for feature_bank_id in experiment.feature_bank_ids
+            if feature_bank_id not in available_feature_bank_ids
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Reproduction experiment '{experiment_id}' references unknown feature banks: {missing}"
+            )
+        if experiment.training_pool not in {"full", "llm_engineering_non_seed"}:
+            raise RuntimeError(
+                f"Reproduction experiment '{experiment_id}' has unsupported training_pool "
+                f"'{experiment.training_pool}'."
+            )
+        if experiment.model_kind not in SUPPORTED_REPRODUCTION_MODEL_KINDS:
+            raise RuntimeError(
+                f"Reproduction experiment '{experiment_id}' has unsupported model_kind "
+                f"'{experiment.model_kind}'."
+            )
+        if experiment.lambda_top_k is not None:
+            if experiment.lambda_top_k <= 0:
+                raise RuntimeError(
+                    f"Reproduction experiment '{experiment_id}' requires lambda_top_k > 0."
+                )
+            if experiment.lambda_rank_base_bank_id not in available_feature_bank_ids:
+                raise RuntimeError(
+                    f"Reproduction experiment '{experiment_id}' references unknown "
+                    f"lambda_rank_base_bank_id '{experiment.lambda_rank_base_bank_id}'."
+                )
+        seen.add(experiment_id)
+
+
+def _validate_model_testing(
+    spec: ModelTestingSpec,
+    *,
+    available_feature_set_ids: set[str],
+) -> None:
+    if not spec.candidate_feature_sets:
+        raise RuntimeError("model_testing.candidate_feature_sets must include at least one feature set.")
+    unknown_feature_sets = [
+        feature_set_id
+        for feature_set_id in spec.candidate_feature_sets
+        if feature_set_id not in available_feature_set_ids
+    ]
+    if unknown_feature_sets:
+        raise RuntimeError(
+            "model_testing.candidate_feature_sets references unknown feature sets: "
+            f"{unknown_feature_sets}"
+        )
+    if not spec.default_model_families:
+        raise RuntimeError("model_testing.default_model_families must include at least one model family.")
+    unknown_model_families = [
+        family for family in spec.default_model_families if family not in SUPPORTED_MODEL_TESTING_FAMILIES
+    ]
+    if unknown_model_families:
+        raise RuntimeError(
+            "model_testing.default_model_families contains unsupported values: "
+            f"{unknown_model_families}"
+        )
+    if spec.screening_repeat_cv_count < 1:
+        raise RuntimeError("model_testing.screening_repeat_cv_count must be >= 1.")
+    if spec.max_recommended_feature_sets < 1:
+        raise RuntimeError("model_testing.max_recommended_feature_sets must be >= 1.")
+    if spec.screening_score_delta < 0.0:
+        raise RuntimeError("model_testing.screening_score_delta must be >= 0.")
+
+
+def _resolve_cv_spec(payload: dict[str, object], *, default_n_splits: int) -> CVSpec:
+    return CVSpec(
+        n_splits=int(payload.get("n_splits", default_n_splits)),
+        shuffle=bool(payload.get("shuffle", True)),
+        random_state=int(payload.get("random_state", 42)),
+    )
 
 
 def load_experiment_config(path: str) -> ExperimentConfig:
     payload = read_json(resolve_repo_path(path))
 
-    datasets_payload = payload["datasets"]
-    target_bank_payload = payload["reasoning_target_bank"]
-    cv_payload = payload["cv"]
-
-    reasoning_models = [
-        ModelSpec(model_id=str(item["model_id"]), kind=str(item["kind"]))
-        for item in payload.get("reasoning_models", [])
+    repository_feature_banks = [
+        RepositoryFeatureBankSpec(
+            feature_bank_id=str(item["feature_bank_id"]),
+            train_path=str(resolve_repo_path(str(item["train_path"]))),
+            test_path=str(resolve_repo_path(str(item["test_path"]))),
+            source_id_column=str(item.get("source_id_column", "founder_uuid")),
+            enabled=bool(item.get("enabled", True)),
+            feature_prefixes=[str(value) for value in item.get("feature_prefixes", [])],
+            exclude_columns=[str(value) for value in item.get("exclude_columns", [])],
+            label_column=str(item["label_column"]) if item.get("label_column") else None,
+            all_features_binary=bool(item.get("all_features_binary", False)),
+            binary_feature_columns=[str(value) for value in item.get("binary_feature_columns", [])],
+        )
+        for item in payload.get("repository_feature_banks", [])
     ]
-    _validate_reasoning_models(reasoning_models)
-
-    reasoning_targets = [
-        ReasoningTargetSpec(target_id=str(item["target_id"]))
-        for item in payload.get("reasoning_targets", [])
-    ]
-    _validate_reasoning_targets(reasoning_targets)
+    _validate_repository_feature_banks(repository_feature_banks)
 
     intermediary_features = [
         IntermediaryFeatureSpec(
-            feature_id=str(item["feature_id"]),
+            feature_bank_id=str(item["feature_bank_id"]),
             kind=str(item["kind"]),
             enabled=bool(item.get("enabled", True)),
             embedding_model_name=(
@@ -197,49 +463,195 @@ def load_experiment_config(path: str) -> ExperimentConfig:
     ]
     _validate_intermediary_features(intermediary_features)
 
-    feature_sets = [
+    target_families = [
+        TargetFamilySpec(
+            family_id=str(item["family_id"]),
+            train_path=str(resolve_repo_path(str(item["train_path"]))),
+            test_path=(
+                str(resolve_repo_path(str(item["test_path"])))
+                if item.get("test_path")
+                else None
+            ),
+            source_id_column=str(item.get("source_id_column", "founder_uuid")),
+            target_id_column=str(item.get("target_id_column", "founder_uuid")),
+            target_prefixes=[str(value) for value in item.get("target_prefixes", [])],
+            task_kind=str(item["task_kind"]),
+            scale_min=(
+                float(item["scale_min"])
+                if item.get("scale_min") is not None
+                else None
+            ),
+            scale_max=(
+                float(item["scale_max"])
+                if item.get("scale_max") is not None
+                else None
+            ),
+            enabled_by_default=bool(item.get("enabled_by_default", False)),
+        )
+        for item in payload.get("target_families", [])
+    ]
+    _validate_target_families(target_families)
+
+    distillation_models = [
+        DistillationModelSpec(
+            model_id=str(item["model_id"]),
+            kind=str(item["kind"]),
+            supported_task_kinds=[str(value) for value in item.get("supported_task_kinds", [])],
+        )
+        for item in payload.get("distillation_models", [])
+    ]
+    _validate_distillation_models(distillation_models)
+
+    all_feature_bank_ids = {
+        *(spec.feature_bank_id for spec in repository_feature_banks),
+        *(spec.feature_bank_id for spec in intermediary_features),
+    }
+    distillation_feature_sets = [
         FeatureSetSpec(
             feature_set_id=str(item["feature_set_id"]),
-            feature_ids=[str(feature_id) for feature_id in item.get("feature_ids", [])],
+            feature_bank_ids=[str(value) for value in item.get("feature_bank_ids", [])],
         )
-        for item in payload.get("feature_sets", [])
+        for item in payload.get("distillation_feature_sets", [])
     ]
     _validate_feature_sets(
-        feature_sets,
-        available_feature_ids={spec.feature_id for spec in intermediary_features},
+        distillation_feature_sets,
+        available_feature_bank_ids=all_feature_bank_ids,
+    )
+    distillation_feature_set_ids = {spec.feature_set_id for spec in distillation_feature_sets}
+
+    defaults_payload = payload.get("defaults", {})
+    defaults = DefaultRunSpec(
+        run_mode=str(defaults_payload.get("run_mode", "reproduction_mode")),
+        target_family=str(defaults_payload.get("target_family", target_families[0].family_id)),
+        heldout_evaluation=bool(defaults_payload.get("heldout_evaluation", False)),
+    )
+    _validate_defaults(
+        defaults,
+        target_family_ids={spec.family_id for spec in target_families},
     )
 
-    reasoning_target_bank = ReasoningTargetBankSpec(
-        train_path=str(resolve_repo_path(str(target_bank_payload["train_path"]))),
-        test_path=(
-            str(resolve_repo_path(str(target_bank_payload["test_path"])))
-            if target_bank_payload.get("test_path")
-            else None
+    reproduction_payload = payload["reproduction"]
+    reproduction = ReproductionSpec(
+        outer_cv=_resolve_cv_spec(
+            reproduction_payload.get("outer_cv", {}),
+            default_n_splits=5,
         ),
-        source_id_column=str(target_bank_payload.get("source_id_column", "founder_uuid")),
-        target_id_column=str(target_bank_payload.get("target_id_column", "founder_uuid")),
-        target_regex=str(target_bank_payload["target_regex"]),
-        scale_min=float(target_bank_payload.get("scale_min", 0.0)),
-        scale_max=float(target_bank_payload.get("scale_max", 1.0)),
-        prediction_mode=str(target_bank_payload.get("prediction_mode", "regression")),
+        inner_cv=_resolve_cv_spec(
+            reproduction_payload.get("inner_cv", {}),
+            default_n_splits=3,
+        ),
+        threshold_grid=ThresholdGridSpec(
+            start=float(reproduction_payload.get("threshold_grid", {}).get("start", 0.05)),
+            stop=float(reproduction_payload.get("threshold_grid", {}).get("stop", 0.95)),
+            step=float(reproduction_payload.get("threshold_grid", {}).get("step", 0.01)),
+        ),
+        logistic_c_grid=[
+            float(value) for value in reproduction_payload.get("logistic_c_grid", [])
+        ],
+        lambda_ranking=LambdaRankingSpec(
+            c=float(reproduction_payload.get("lambda_ranking", {}).get("c", 0.05)),
+            max_iter=int(reproduction_payload.get("lambda_ranking", {}).get("max_iter", 2000)),
+            solver=str(reproduction_payload.get("lambda_ranking", {}).get("solver", "liblinear")),
+            class_weight=str(
+                reproduction_payload.get("lambda_ranking", {}).get("class_weight", "balanced")
+            ),
+            random_state=int(
+                reproduction_payload.get("lambda_ranking", {}).get("random_state", 42)
+            ),
+        ),
+        experiments=[
+            ReproductionExperimentSpec(
+                experiment_id=str(item["experiment_id"]),
+                title=str(item.get("title", item["experiment_id"])),
+                feature_bank_ids=[str(value) for value in item.get("feature_bank_ids", [])],
+                training_pool=str(item.get("training_pool", "full")),
+                model_kind=str(item["model_kind"]),
+                use_exit_override=bool(item.get("use_exit_override", False)),
+                lambda_top_k=(
+                    int(item["lambda_top_k"])
+                    if item.get("lambda_top_k") is not None
+                    else None
+                ),
+                lambda_rank_base_bank_id=(
+                    str(item["lambda_rank_base_bank_id"])
+                    if item.get("lambda_rank_base_bank_id") is not None
+                    else None
+                ),
+                standardize=bool(item.get("standardize", True)),
+            )
+            for item in reproduction_payload.get("experiments", [])
+        ],
     )
-    _validate_reasoning_target_bank_spec(reasoning_target_bank)
+    _validate_reproduction(
+        reproduction,
+        available_feature_bank_ids=all_feature_bank_ids,
+    )
+
+    distillation_cv = _resolve_cv_spec(
+        payload.get("distillation_cv", {}),
+        default_n_splits=3,
+    )
+    _validate_cv_spec("distillation_cv", distillation_cv)
+
+    model_testing_payload = payload.get("model_testing", {})
+    default_candidate_feature_sets = [
+        spec.feature_set_id for spec in distillation_feature_sets[:4]
+    ] or [spec.feature_set_id for spec in distillation_feature_sets]
+    model_testing = ModelTestingSpec(
+        candidate_feature_sets=[
+            str(value)
+            for value in model_testing_payload.get(
+                "candidate_feature_sets",
+                default_candidate_feature_sets,
+            )
+        ],
+        default_model_families=[
+            str(value)
+            for value in model_testing_payload.get(
+                "default_model_families",
+                ["linear_l2", "xgb1", "mlp", "elasticnet", "randomforest"],
+            )
+        ],
+        run_advanced_models_default=bool(
+            model_testing_payload.get("run_advanced_models_default", False)
+        ),
+        screening_repeat_cv_count=int(
+            model_testing_payload.get("screening_repeat_cv_count", 3)
+        ),
+        screening_score_delta=float(model_testing_payload.get("screening_score_delta", 0.005)),
+        max_recommended_feature_sets=int(
+            model_testing_payload.get("max_recommended_feature_sets", 3)
+        ),
+    )
+    _validate_model_testing(
+        model_testing,
+        available_feature_set_ids=distillation_feature_set_ids,
+    )
 
     return ExperimentConfig(
         experiment_id=str(payload["experiment_id"]),
         description=str(payload.get("description", "")),
         datasets=DatasetPaths(
-            public_train_csv=str(resolve_repo_path(str(datasets_payload["public_train_csv"]))),
-            private_test_csv=str(resolve_repo_path(str(datasets_payload["private_test_csv"]))),
+            public_train_csv=str(resolve_repo_path(str(payload["datasets"]["public_train_csv"]))),
+            private_test_csv=str(resolve_repo_path(str(payload["datasets"]["private_test_csv"]))),
         ),
-        reasoning_target_bank=reasoning_target_bank,
-        reasoning_targets=reasoning_targets,
-        reasoning_models=reasoning_models,
+        feature_repository=FeatureRepositoryPaths(
+            root_dir=str(resolve_repo_path(str(payload["feature_repository"]["root_dir"]))),
+            labels_path=str(resolve_repo_path(str(payload["feature_repository"]["labels_path"]))),
+            train_uuids_path=str(
+                resolve_repo_path(str(payload["feature_repository"]["train_uuids_path"]))
+            ),
+            test_uuids_path=str(
+                resolve_repo_path(str(payload["feature_repository"]["test_uuids_path"]))
+            ),
+        ),
+        defaults=defaults,
+        repository_feature_banks=repository_feature_banks,
         intermediary_features=intermediary_features,
-        feature_sets=feature_sets,
-        cv=CVSpec(
-            n_splits=int(cv_payload.get("n_splits", 3)),
-            shuffle=bool(cv_payload.get("shuffle", True)),
-            random_state=int(cv_payload.get("random_state", 42)),
-        ),
+        distillation_feature_sets=distillation_feature_sets,
+        target_families=target_families,
+        distillation_models=distillation_models,
+        reproduction=reproduction,
+        distillation_cv=distillation_cv,
+        model_testing=model_testing,
     )

@@ -26,10 +26,11 @@ Logger = Callable[[str], None]
 @dataclass(frozen=True)
 class AssembledFeatureSet:
     feature_set_id: str
-    feature_ids: list[str]
+    feature_bank_ids: list[str]
     public_frame: pd.DataFrame
     private_frame: pd.DataFrame
     feature_columns: list[str]
+    binary_feature_columns: list[str]
     manifest: dict[str, object]
 
 
@@ -64,7 +65,7 @@ def _build_bank(
             private_raw,
         )
         return save_intermediary_bank(
-            feature_id=spec.feature_id,
+            feature_id=spec.feature_bank_id,
             builder_kind=spec.kind,
             storage_dir=storage_dir,
             public_frame=public_frame,
@@ -93,7 +94,7 @@ def _build_bank(
             feature_prefix="sentence_prose",
         )
         return save_intermediary_bank(
-            feature_id=spec.feature_id,
+            feature_id=spec.feature_bank_id,
             builder_kind=spec.kind,
             storage_dir=storage_dir,
             public_frame=public_frame,
@@ -115,7 +116,7 @@ def _build_bank(
             feature_prefix="sentence_structured",
         )
         return save_intermediary_bank(
-            feature_id=spec.feature_id,
+            feature_id=spec.feature_bank_id,
             builder_kind=spec.kind,
             storage_dir=storage_dir,
             public_frame=public_frame,
@@ -149,16 +150,16 @@ def prepare_intermediary_banks(
     for spec in feature_specs:
         storage_dir = _resolve_storage_dir(spec)
         if bank_exists(storage_dir) and not force_rebuild:
-            _log(logger, f"Reusing intermediary feature bank '{spec.feature_id}' from {storage_dir}.")
-            resolved[spec.feature_id] = load_intermediary_bank(
-                feature_id=spec.feature_id,
+            _log(logger, f"Reusing intermediary feature bank '{spec.feature_bank_id}' from {storage_dir}.")
+            resolved[spec.feature_bank_id] = load_intermediary_bank(
+                feature_id=spec.feature_bank_id,
                 builder_kind=spec.kind,
                 storage_dir=storage_dir,
             )
             continue
 
-        _log(logger, f"Building intermediary feature bank '{spec.feature_id}'.")
-        resolved[spec.feature_id] = _build_bank(
+        _log(logger, f"Building intermediary feature bank '{spec.feature_bank_id}'.")
+        resolved[spec.feature_bank_id] = _build_bank(
             spec=spec,
             public_raw=public_raw,
             private_raw=private_raw,
@@ -175,14 +176,28 @@ def _merge_with_full_overlap(
     right_name: str,
 ) -> pd.DataFrame:
     merged = left_frame.merge(right_frame, on=on, how="left", validate="one_to_one")
-    if merged.isna().any().any():
-        missing = sorted(
-            set(left_frame[on].astype(str)) - set(right_frame[on].astype(str))
-        )
+    missing = sorted(
+        set(left_frame[on].astype(str)) - set(right_frame[on].astype(str))
+    )
+    if missing:
         raise RuntimeError(
             f"{right_name} is missing {len(missing)} ids required by {left_name}. Examples: {missing[:5]}"
         )
     return merged
+
+
+def _drop_missing_public_rows(
+    frame: pd.DataFrame,
+    *,
+    feature_columns: list[str],
+) -> tuple[pd.DataFrame, list[str]]:
+    if not feature_columns:
+        return frame.copy(), []
+    missing_mask = frame[feature_columns].isna().any(axis=1)
+    if not missing_mask.any():
+        return frame.copy(), []
+    dropped_ids = frame.loc[missing_mask, "founder_uuid"].astype(str).tolist()
+    return frame.loc[~missing_mask].reset_index(drop=True), dropped_ids
 
 
 def assemble_feature_sets(
@@ -200,9 +215,10 @@ def assemble_feature_sets(
         public_frame = public_base.copy()
         private_frame = private_base.copy()
         feature_columns: list[str] = []
+        binary_feature_columns: list[str] = []
         component_manifests: list[dict[str, object]] = []
 
-        for feature_id in feature_set.feature_ids:
+        for feature_id in feature_set.feature_bank_ids:
             bank = banks_by_id[feature_id]
             public_frame = _merge_with_full_overlap(
                 public_frame,
@@ -219,26 +235,43 @@ def assemble_feature_sets(
                 right_name=f"intermediary bank '{feature_id}' private frame",
             )
             feature_columns.extend(bank.feature_columns)
+            binary_feature_columns.extend(bank.binary_feature_columns)
             component_manifests.append(
                 {
                     "feature_id": bank.feature_id,
                     "builder_kind": bank.builder_kind,
                     "storage_dir": str(bank.storage_dir),
                     "feature_count": len(bank.feature_columns),
+                    "binary_feature_count": len(bank.binary_feature_columns),
                 }
+            )
+
+        public_frame, dropped_public_ids = _drop_missing_public_rows(
+            public_frame,
+            feature_columns=feature_columns,
+        )
+        if private_frame[feature_columns].isna().any().any():
+            raise RuntimeError(
+                f"Feature set '{feature_set.feature_set_id}' contains missing held-out feature values."
             )
 
         assembled.append(
             AssembledFeatureSet(
                 feature_set_id=feature_set.feature_set_id,
-                feature_ids=feature_set.feature_ids,
+                feature_bank_ids=feature_set.feature_bank_ids,
                 public_frame=public_frame,
                 private_frame=private_frame,
                 feature_columns=feature_columns,
+                binary_feature_columns=sorted(set(binary_feature_columns)),
                 manifest={
                     "feature_set_id": feature_set.feature_set_id,
-                    "feature_ids": feature_set.feature_ids,
+                    "feature_bank_ids": feature_set.feature_bank_ids,
                     "feature_count": len(feature_columns),
+                    "binary_feature_count": len(set(binary_feature_columns)),
+                    "public_row_count": len(public_frame),
+                    "private_row_count": len(private_frame),
+                    "dropped_public_ids_count": len(dropped_public_ids),
+                    "dropped_public_ids_preview": dropped_public_ids[:10],
                     "component_banks": component_manifests,
                 },
             )

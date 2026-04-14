@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from src.evaluation.metrics import binary_classification_metrics, select_f05_threshold
-from src.pipeline.config import ModelSpec
+from src.pipeline.config import DistillationModelSpec
 from src.student.models import build_downstream_classifier
 
 
@@ -107,7 +107,7 @@ def evaluate_public_downstream_routes(
     labels: pd.Series,
     true_reasoning: pd.DataFrame,
     predicted_reasoning_by_model: dict[str, pd.DataFrame],
-    model_specs: list[ModelSpec],
+    model_specs: list[DistillationModelSpec],
     splits: list,
     random_state: int,
 ) -> DownstreamPublicOutputs:
@@ -177,7 +177,7 @@ def predict_private_downstream_routes(
     true_reasoning_private: pd.DataFrame | None,
     predicted_reasoning_public_by_model: dict[str, pd.DataFrame],
     predicted_reasoning_private_by_model: dict[str, pd.DataFrame],
-    model_specs: list[ModelSpec],
+    model_specs: list[DistillationModelSpec],
     random_state: int,
 ) -> pd.DataFrame:
     public_routes = _build_public_routes(
@@ -229,4 +229,3 @@ def predict_private_downstream_routes(
                     }
                 )
     return pd.DataFrame(rows)
-

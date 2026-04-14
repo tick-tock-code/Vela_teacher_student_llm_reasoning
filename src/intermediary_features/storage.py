@@ -19,6 +19,7 @@ class ResolvedIntermediaryBank:
     public_frame: pd.DataFrame
     private_frame: pd.DataFrame
     feature_columns: list[str]
+    binary_feature_columns: list[str]
     manifest: dict[str, object]
 
 
@@ -69,6 +70,7 @@ def save_intermediary_bank(
     private_frame: pd.DataFrame,
     feature_columns: list[str],
     manifest: dict[str, object],
+    binary_feature_columns: list[str] | None = None,
     extra_tables: dict[str, pd.DataFrame] | None = None,
 ) -> ResolvedIntermediaryBank:
     write_parquet(_public_path(storage_dir), public_frame)
@@ -85,6 +87,7 @@ def save_intermediary_bank(
         "private_path": str(_private_path(storage_dir)),
         "manifest_path": str(_manifest_path(storage_dir)),
         "feature_columns": feature_columns,
+        "binary_feature_columns": list(binary_feature_columns or []),
         "public_row_count": int(len(public_frame)),
         "private_row_count": int(len(private_frame)),
         "feature_count": int(len(feature_columns)),
@@ -98,6 +101,7 @@ def save_intermediary_bank(
         public_frame=public_frame,
         private_frame=private_frame,
         feature_columns=feature_columns,
+        binary_feature_columns=list(binary_feature_columns or []),
         manifest=manifest_payload,
     )
 
@@ -112,6 +116,9 @@ def load_intermediary_bank(
     public_frame = read_table(_public_path(storage_dir))
     private_frame = read_table(_private_path(storage_dir))
     feature_columns = [str(column) for column in manifest.get("feature_columns", [])]
+    binary_feature_columns = [
+        str(column) for column in manifest.get("binary_feature_columns", [])
+    ]
     return ResolvedIntermediaryBank(
         feature_id=feature_id,
         builder_kind=builder_kind,
@@ -119,5 +126,6 @@ def load_intermediary_bank(
         public_frame=public_frame,
         private_frame=private_frame,
         feature_columns=feature_columns,
+        binary_feature_columns=binary_feature_columns,
         manifest=manifest,
     )
