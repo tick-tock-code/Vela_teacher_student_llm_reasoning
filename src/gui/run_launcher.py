@@ -3,7 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from tkinter import scrolledtext, ttk
 
 from src.data.targets import load_target_family
@@ -59,61 +59,10 @@ def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
 
 
 def apply_launcher_config_overrides(config: ExperimentConfig, selections: LauncherSelections) -> ExperimentConfig:
-    random_state = (
-        config.distillation_cv.random_state if selections.cv_random_state is None else int(selections.cv_random_state)
-    )
-    reproduction = replace(
-        config.reproduction,
-        outer_cv=replace(
-            config.reproduction.outer_cv,
-            n_splits=(
-                config.reproduction.outer_cv.n_splits
-                if selections.reproduction_outer_splits is None
-                else int(selections.reproduction_outer_splits)
-            ),
-            random_state=random_state,
-        ),
-        inner_cv=replace(
-            config.reproduction.inner_cv,
-            n_splits=(
-                config.reproduction.inner_cv.n_splits
-                if selections.reproduction_inner_splits is None
-                else int(selections.reproduction_inner_splits)
-            ),
-            random_state=random_state,
-        ),
-        threshold_grid=replace(
-            config.reproduction.threshold_grid,
-            start=(
-                config.reproduction.threshold_grid.start
-                if selections.threshold_start is None
-                else float(selections.threshold_start)
-            ),
-            stop=(
-                config.reproduction.threshold_grid.stop
-                if selections.threshold_stop is None
-                else float(selections.threshold_stop)
-            ),
-            step=(
-                config.reproduction.threshold_grid.step
-                if selections.threshold_step is None
-                else float(selections.threshold_step)
-            ),
-        ),
-    )
-    return replace(
-        config,
-        reproduction=reproduction,
-        distillation_cv=replace(
-            config.distillation_cv,
-            n_splits=(
-                config.distillation_cv.n_splits
-                if selections.distillation_splits is None
-                else int(selections.distillation_splits)
-            ),
-            random_state=random_state,
-        ),
-    )
+    _ = selections
+    # CV/threshold override controls are intentionally dormant in the GUI.
+    # Launcher runs always use the config-defined CV strategy.
+    return config
 
 
 class RunLauncher(ttk.Frame):
@@ -139,20 +88,11 @@ class RunLauncher(ttk.Frame):
         self.embedding_model_var = tk.StringVar(value="sentence-transformers/all-MiniLM-L6-v2")
         self.repeat_cv_var = tk.BooleanVar(value=False)
         self.repeat_count_var = tk.StringVar(value="1")
-        self.nested_cv_var = tk.BooleanVar(value=True)
         self.save_predictions_var = tk.BooleanVar(value=True)
-        self.repro_outer_var = tk.StringVar(value="")
-        self.repro_inner_var = tk.StringVar(value="")
-        self.distill_folds_var = tk.StringVar(value="")
-        self.random_state_var = tk.StringVar(value="")
-        self.threshold_start_var = tk.StringVar(value="")
-        self.threshold_stop_var = tk.StringVar(value="")
-        self.threshold_step_var = tk.StringVar(value="")
 
         self.mt_target_family_var = tk.StringVar(value="v25_policies")
-        self.mt_repeat_cv_var = tk.BooleanVar(value=True)
-        self.mt_repeat_count_var = tk.StringVar(value="3")
-        self.mt_nested_cv_var = tk.BooleanVar(value=False)
+        self.mt_repeat_cv_var = tk.BooleanVar(value=False)
+        self.mt_repeat_count_var = tk.StringVar(value="1")
         self.mt_force_rebuild_var = tk.BooleanVar(value=False)
         self.mt_run_advanced_var = tk.BooleanVar(value=False)
         self.mt_embedding_model_var = tk.StringVar(value="sentence-transformers/all-MiniLM-L6-v2")
@@ -174,6 +114,39 @@ class RunLauncher(ttk.Frame):
         self._build_ui()
         self._load_config_preview()
         self.after(100, self._poll_queue)
+
+    @staticmethod
+    def _attach_mousewheel(canvas: tk.Canvas) -> None:
+        def _on_mousewheel(event: tk.Event) -> None:  # type: ignore[type-arg]
+            if getattr(event, "delta", 0) == 0:
+                return
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        canvas.bind("<Enter>", lambda _event: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"))
+
+    def _make_scrollable_tab(self, parent: ttk.Frame) -> ttk.Frame:
+        canvas = tk.Canvas(parent, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        body = ttk.Frame(canvas, padding=10)
+        window_id = canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def _on_body_configure(_event: tk.Event) -> None:  # type: ignore[type-arg]
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[type-arg]
+            canvas.itemconfigure(window_id, width=event.width)
+
+        body.bind("<Configure>", _on_body_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self._attach_mousewheel(canvas)
+        return body
 
     def _build_ui(self) -> None:
         self.grid(sticky="nsew")
@@ -197,12 +170,12 @@ class RunLauncher(ttk.Frame):
         notebook.grid(row=1, column=0, sticky="nsew")
         self.rowconfigure(1, weight=1)
 
-        self.setup_tab = ttk.Frame(notebook, padding=10)
-        self.testing_tab = ttk.Frame(notebook, padding=10)
-        notebook.add(self.setup_tab, text="Run Setup")
-        notebook.add(self.testing_tab, text="Model Testing")
-        self.setup_tab.columnconfigure(1, weight=1)
-        self.testing_tab.columnconfigure(1, weight=1)
+        setup_tab_container = ttk.Frame(notebook)
+        testing_tab_container = ttk.Frame(notebook)
+        notebook.add(setup_tab_container, text="Run Setup")
+        notebook.add(testing_tab_container, text="Model Testing")
+        self.setup_tab = self._make_scrollable_tab(setup_tab_container)
+        self.testing_tab = self._make_scrollable_tab(testing_tab_container)
 
         self._build_setup_tab()
         self._build_testing_tab()
@@ -227,6 +200,7 @@ class RunLauncher(ttk.Frame):
         self.log_text.grid(row=0, column=0, sticky="nsew")
 
     def _build_setup_tab(self) -> None:
+        self.setup_tab.columnconfigure(1, weight=1)
         ttk.Label(self.setup_tab, text="Mode").grid(row=0, column=0, sticky="w")
         self.setup_mode_combo = ttk.Combobox(
             self.setup_tab,
@@ -267,12 +241,11 @@ class RunLauncher(ttk.Frame):
         ttk.Label(flags, text="Repeat count").grid(row=2, column=1, sticky="e")
         self.setup_repeat_entry = ttk.Entry(flags, textvariable=self.repeat_count_var, width=8)
         self.setup_repeat_entry.grid(row=2, column=2, sticky="w")
-        ttk.Checkbutton(flags, text="Use nested hyperparameter CV", variable=self.nested_cv_var).grid(row=3, column=0, sticky="w")
         ttk.Checkbutton(flags, text="Save reasoning predictions to tmp", variable=self.save_predictions_var).grid(
-            row=4, column=0, sticky="w"
+            row=3, column=0, sticky="w"
         )
-        ttk.Label(flags, text="Embedding model").grid(row=5, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(flags, textvariable=self.embedding_model_var).grid(row=6, column=0, columnspan=3, sticky="ew")
+        ttk.Label(flags, text="Embedding model").grid(row=4, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(flags, textvariable=self.embedding_model_var).grid(row=5, column=0, columnspan=3, sticky="ew")
 
         features_frame = ttk.LabelFrame(self.setup_tab, text="Feature Banks")
         features_frame.grid(row=4, column=0, sticky="nsew", padx=(0, 8))
@@ -292,26 +265,15 @@ class RunLauncher(ttk.Frame):
             variable=self.setup_model_vars["xgb1"],
         ).grid(row=1, column=0, sticky="w")
 
-        hyper = ttk.LabelFrame(self.setup_tab, text="CV / Threshold Overrides")
-        hyper.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        for index in range(4):
-            hyper.columnconfigure(index, weight=1)
-        ttk.Label(hyper, text="Repro outer").grid(row=0, column=0, sticky="w")
-        ttk.Entry(hyper, textvariable=self.repro_outer_var, width=10).grid(row=1, column=0, sticky="w")
-        ttk.Label(hyper, text="Repro inner").grid(row=0, column=1, sticky="w")
-        ttk.Entry(hyper, textvariable=self.repro_inner_var, width=10).grid(row=1, column=1, sticky="w")
-        ttk.Label(hyper, text="Distillation folds").grid(row=0, column=2, sticky="w")
-        ttk.Entry(hyper, textvariable=self.distill_folds_var, width=10).grid(row=1, column=2, sticky="w")
-        ttk.Label(hyper, text="Random state").grid(row=0, column=3, sticky="w")
-        ttk.Entry(hyper, textvariable=self.random_state_var, width=10).grid(row=1, column=3, sticky="w")
-        ttk.Label(hyper, text="Threshold start").grid(row=2, column=0, sticky="w")
-        ttk.Entry(hyper, textvariable=self.threshold_start_var, width=10).grid(row=3, column=0, sticky="w")
-        ttk.Label(hyper, text="Threshold stop").grid(row=2, column=1, sticky="w")
-        ttk.Entry(hyper, textvariable=self.threshold_stop_var, width=10).grid(row=3, column=1, sticky="w")
-        ttk.Label(hyper, text="Threshold step").grid(row=2, column=2, sticky="w")
-        ttk.Entry(hyper, textvariable=self.threshold_step_var, width=10).grid(row=3, column=2, sticky="w")
+        ttk.Label(
+            self.setup_tab,
+            text="CV strategy is fixed to config defaults (5-fold outer, 3-fold inner nested) unless changed via config/CLI.",
+            justify="left",
+            wraplength=980,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
     def _build_testing_tab(self) -> None:
+        self.testing_tab.columnconfigure(1, weight=1)
         ttk.Label(self.testing_tab, text="Target family").grid(row=0, column=0, sticky="w")
         self.mt_target_combo = ttk.Combobox(
             self.testing_tab,
@@ -328,7 +290,6 @@ class RunLauncher(ttk.Frame):
 
         candidates = ttk.LabelFrame(self.testing_tab, text="Candidate Feature Sets")
         candidates.grid(row=2, column=0, sticky="nsew", padx=(0, 8), pady=(8, 8))
-        self.testing_tab.columnconfigure(0, weight=1)
         self.mt_candidates_frame = candidates
 
         families = ttk.LabelFrame(self.testing_tab, text="Model Families")
@@ -356,14 +317,11 @@ class RunLauncher(ttk.Frame):
         ttk.Label(settings, text="Repeat count").grid(row=0, column=1, sticky="e")
         self.mt_repeat_entry = ttk.Entry(settings, textvariable=self.mt_repeat_count_var, width=8)
         self.mt_repeat_entry.grid(row=0, column=2, sticky="w")
-        ttk.Checkbutton(settings, text="Use nested hyperparameter CV", variable=self.mt_nested_cv_var).grid(
+        ttk.Checkbutton(settings, text="Run advanced models stage", variable=self.mt_run_advanced_var).grid(
             row=1, column=0, sticky="w"
         )
-        ttk.Checkbutton(settings, text="Run advanced models stage", variable=self.mt_run_advanced_var).grid(
-            row=1, column=1, sticky="w"
-        )
         ttk.Checkbutton(settings, text="Force rebuild intermediary banks", variable=self.mt_force_rebuild_var).grid(
-            row=1, column=2, sticky="w"
+            row=1, column=1, sticky="w"
         )
         ttk.Label(settings, text="Embedding model").grid(row=2, column=0, sticky="w", pady=(4, 0))
         ttk.Entry(settings, textvariable=self.mt_embedding_model_var).grid(row=2, column=1, columnspan=2, sticky="ew", pady=(4, 0))
@@ -386,17 +344,10 @@ class RunLauncher(ttk.Frame):
             f"distillation folds={config.distillation_cv.n_splits} | model-testing repeats={config.model_testing.screening_repeat_cv_count}"
         )
         self.heldout_var.set(bool(config.defaults.heldout_evaluation))
-        self.repro_outer_var.set(str(config.reproduction.outer_cv.n_splits))
-        self.repro_inner_var.set(str(config.reproduction.inner_cv.n_splits))
-        self.distill_folds_var.set(str(config.distillation_cv.n_splits))
-        self.random_state_var.set(str(config.distillation_cv.random_state))
-        self.threshold_start_var.set(str(config.reproduction.threshold_grid.start))
-        self.threshold_stop_var.set(str(config.reproduction.threshold_grid.stop))
-        self.threshold_step_var.set(str(config.reproduction.threshold_grid.step))
         self.repeat_cv_var.set(False)
         self.repeat_count_var.set("1")
-        self.mt_repeat_cv_var.set(True)
-        self.mt_repeat_count_var.set(str(config.model_testing.screening_repeat_cv_count))
+        self.mt_repeat_cv_var.set(False)
+        self.mt_repeat_count_var.set("1")
         self.mt_run_advanced_var.set(bool(config.model_testing.run_advanced_models_default))
 
         for spec in config.intermediary_features:
@@ -467,7 +418,10 @@ class RunLauncher(ttk.Frame):
         is_distillation = self.run_mode_var.get() == "reasoning_distillation_mode"
         state = "!disabled" if is_distillation else "disabled"
         self.setup_target_combo.state([state])
-        self.setup_repeat_entry.state([state if self.repeat_cv_var.get() else "disabled"])
+        if is_distillation and self.repeat_cv_var.get():
+            self.setup_repeat_entry.state(["!disabled"])
+        else:
+            self.setup_repeat_entry.state(["disabled"])
         if is_distillation:
             self.target_preview_var.set(self.target_preview_var.get())
 
@@ -483,6 +437,7 @@ class RunLauncher(ttk.Frame):
             if value < 2:
                 self.repeat_count_var.set("3")
             self.setup_repeat_entry.state(["!disabled"])
+        self._sync_setup_mode()
 
     def _on_testing_repeat_toggle(self) -> None:
         if not self.mt_repeat_cv_var.get():
@@ -536,21 +491,16 @@ class RunLauncher(ttk.Frame):
         value = value.strip()
         return None if not value else int(value)
 
-    @staticmethod
-    def _parse_optional_float(value: str) -> float | None:
-        value = value.strip()
-        return None if not value else float(value)
-
     def _build_common_kwargs(self) -> dict[str, object]:
         return {
             "config_path": self.config_path_var.get().strip(),
-            "reproduction_outer_splits": self._parse_optional_int(self.repro_outer_var.get()),
-            "reproduction_inner_splits": self._parse_optional_int(self.repro_inner_var.get()),
-            "distillation_splits": self._parse_optional_int(self.distill_folds_var.get()),
-            "cv_random_state": self._parse_optional_int(self.random_state_var.get()),
-            "threshold_start": self._parse_optional_float(self.threshold_start_var.get()),
-            "threshold_stop": self._parse_optional_float(self.threshold_stop_var.get()),
-            "threshold_step": self._parse_optional_float(self.threshold_step_var.get()),
+            "reproduction_outer_splits": None,
+            "reproduction_inner_splits": None,
+            "distillation_splits": None,
+            "cv_random_state": None,
+            "threshold_start": None,
+            "threshold_stop": None,
+            "threshold_step": None,
         }
 
     def _setup_selections(self) -> LauncherSelections:
@@ -570,7 +520,7 @@ class RunLauncher(ttk.Frame):
             embedding_model_name=self.embedding_model_var.get().strip() or None,
             repeat_cv_with_new_seeds=bool(self.repeat_cv_var.get()),
             cv_seed_repeat_count=self._parse_optional_int(self.repeat_count_var.get()),
-            distillation_nested_sweep=bool(self.nested_cv_var.get()),
+            distillation_nested_sweep=True,
             save_reasoning_predictions=bool(self.save_predictions_var.get()),
             candidate_feature_sets=None,
             model_families=None,
@@ -590,7 +540,7 @@ class RunLauncher(ttk.Frame):
             embedding_model_name=self.mt_embedding_model_var.get().strip() or None,
             repeat_cv_with_new_seeds=bool(self.mt_repeat_cv_var.get()),
             cv_seed_repeat_count=self._parse_optional_int(self.mt_repeat_count_var.get()),
-            distillation_nested_sweep=bool(self.mt_nested_cv_var.get()),
+            distillation_nested_sweep=True,
             save_reasoning_predictions=False,
             candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
             model_families=[key for key, var in self.mt_model_family_vars.items() if var.get()],
