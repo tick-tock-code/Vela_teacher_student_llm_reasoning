@@ -26,7 +26,11 @@ from src.llm_engineering.custom_prompts import (
     postprocess_generated_rules,
     render_custom_rule_prompt,
 )
-from src.pipeline.model_testing import _aggregate_screening_metrics, run_model_testing_mode
+from src.pipeline.model_testing import (
+    _aggregate_screening_metrics,
+    _resolve_stage_a_model_families,
+    run_model_testing_mode,
+)
 from src.pipeline.config import FeatureSetSpec, load_experiment_config
 from src.pipeline.run_distillation import parse_run_overrides
 from src.pipeline.run_options import RunOverrides, resolve_run_options
@@ -401,6 +405,7 @@ class ComponentTests(unittest.TestCase):
             sorted(spec.model_id for spec in resolved_regression.distillation_models),
             ["ridge", "xgb1_regressor"],
         )
+        self.assertEqual(resolved_regression.output_modes, ["single_target"])
 
         resolved_classification = resolve_run_options(
             config,
@@ -416,10 +421,25 @@ class ComponentTests(unittest.TestCase):
             ["logreg_classifier", "xgb1_classifier"],
         )
 
+    def test_model_testing_mode_accepts_multi_output_selection(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="model_testing_mode",
+                target_family="v25_policies",
+                candidate_feature_sets=["sentence_bundle"],
+                model_families=["linear_l2"],
+                output_modes=["single_target", "multi_output"],
+            ),
+        )
+        self.assertEqual(resolved.output_modes, ["single_target", "multi_output"])
+
     def test_screening_score_rule_marks_top_set_and_close_runners(self) -> None:
         repeat_metrics = pd.DataFrame(
             {
                 "target_family": ["v25_policies"] * 6,
+                "output_mode": ["single_target"] * 6,
                 "feature_set_id": ["a", "a", "b", "b", "c", "c"],
                 "repeat_index": [0, 1, 0, 1, 0, 1],
                 "r2": [0.40, 0.42, 0.405, 0.41, 0.30, 0.31],
@@ -439,6 +459,18 @@ class ComponentTests(unittest.TestCase):
         recommended = screening[screening["recommended_take_forward"]]
         self.assertIn("a", recommended["feature_set_id"].tolist())
         self.assertIn("b", recommended["feature_set_id"].tolist())
+
+    def test_stage_a_model_family_selection_respects_ui_choices(self) -> None:
+        self.assertEqual(
+            _resolve_stage_a_model_families(["linear_l2", "mlp"]),
+            ["linear_l2"],
+        )
+        self.assertEqual(
+            _resolve_stage_a_model_families(["xgb1", "randomforest"]),
+            ["xgb1"],
+        )
+        with self.assertRaises(RuntimeError):
+            _resolve_stage_a_model_families(["mlp", "elasticnet", "randomforest"])
 
     def test_model_testing_mode_rejects_heldout_override(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")

@@ -1,0 +1,18 @@
+feature_id,source,original_name,text,llm,scoring_format,fire_rate_train,pos_lift,univariate_train_f0.5,notes
+le_has_high_qs_education,llm_engineering_set_05,has_high_qs_education,has high qs education,gpt-4.1-nano,binary,0.0939,2.368,0.2148,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_industry_in_tech_or_health,llm_engineering_set_05,industry_in_tech_or_health,industry in tech or health,gpt-4.1-nano,binary,0.1702,1.172,0.1165,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_has_executive_experience,llm_engineering_set_05,has_executive_experience,has executive experience,gpt-4.1-nano,binary,0.3066,1.005,0.1053,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_has_ipo_or_acquisition,llm_engineering_set_05,has_ipo_or_acquisition,has ipo or acquisition,gpt-4.1-nano,binary,0.032,2.994,0.1979,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_has_graduate_degree,llm_engineering_set_05,has_graduate_degree,has graduate degree,gpt-4.1-nano,binary,0.0,,0.0,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_has_long_term_experience,llm_engineering_set_05,has_long_term_experience,has long term experience,gpt-4.1-nano,binary,0.188,0.752,0.0756,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_experienced_in_software_or_it,llm_engineering_set_05,experienced_in_software_or_it,experienced in software or it,gpt-4.1-nano,binary,0.0,,0.0,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_industry_known,llm_engineering_set_05,industry_known,industry known,gpt-4.1-nano,binary,0.278,1.181,0.1229,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_has_education_in_ranked_institution,llm_engineering_set_05,has_education_in_ranked_institution,has education in ranked institution,gpt-4.1-nano,binary,0.2591,1.628,0.1685,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_has_public_experience,llm_engineering_set_05,has_public_experience,has public experience,gpt-4.1-nano,binary,0.0925,1.447,0.1309,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_industry_has_ipo,llm_engineering_set_05,industry_has_ipo,industry has ipo,gpt-4.1-nano,binary,0.0045,4.444,0.084,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_industry_has_acquisition,llm_engineering_set_05,industry_has_acquisition,industry has acquisition,gpt-4.1-nano,binary,0.0291,2.865,0.1817,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_founder_has_bachelor_or_higher,llm_engineering_set_05,founder_has_bachelor_or_higher,founder has bachelor or higher,gpt-4.1-nano,binary,0.4059,1.481,0.1578,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_industry_in_health_or_biotech,llm_engineering_set_05,industry_in_health_or_biotech,industry in health or biotech,gpt-4.1-nano,binary,0.0993,1.398,0.1283,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_has_experience_in_startup_roles,llm_engineering_set_05,has_experience_in_startup_roles,has experience in startup roles,gpt-4.1-nano,binary,0.3105,1.057,0.1109,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_industry_has_long_history,llm_engineering_set_05,industry_has_long_history,industry has long history,gpt-4.1-nano,binary,0.188,0.752,0.0756,Binary LLM-engineered feature. 100 seed founders NaN in train.
+le_founder_has_multidisciplinary_education,llm_engineering_set_05,founder_has_multidisciplinary_education,founder has multidisciplinary education,gpt-4.1-nano,binary,0.4495,0.899,0.0963,Binary LLM-engineered feature. 100 seed founders NaN in train.

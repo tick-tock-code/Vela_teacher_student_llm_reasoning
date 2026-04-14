@@ -14,6 +14,7 @@ from src.pipeline.config import (
 
 
 DEFAULT_CONFIG_PATH = "experiments/teacher_student_distillation_v1.json"
+SUPPORTED_OUTPUT_MODES = {"single_target", "multi_output"}
 
 
 MODEL_FAMILY_TO_MODEL_ID: dict[str, dict[str, str]] = {
@@ -50,6 +51,7 @@ class RunOverrides:
     save_reasoning_predictions: bool | None = None
     candidate_feature_sets: list[str] | None = None
     model_families: list[str] | None = None
+    output_modes: list[str] | None = None
     run_advanced_models: bool | None = None
 
 
@@ -71,6 +73,7 @@ class ResolvedRunOptions:
     save_reasoning_predictions: bool
     candidate_feature_sets: list[str]
     model_families: list[str]
+    output_modes: list[str]
     run_advanced_models: bool
 
 
@@ -138,6 +141,26 @@ def _resolve_model_families(
     )
     if not requested:
         raise RuntimeError("At least one model family must be selected for model_testing_mode.")
+    return requested
+
+
+def _resolve_output_modes(
+    *,
+    overrides: RunOverrides,
+    run_mode: str,
+) -> list[str]:
+    requested = list(overrides.output_modes) if overrides.output_modes is not None else ["single_target"]
+    _require_known_subset(
+        requested,
+        available=SUPPORTED_OUTPUT_MODES,
+        label="output modes",
+    )
+    if not requested:
+        raise RuntimeError("At least one output mode must be selected.")
+    if run_mode != "model_testing_mode" and len(requested) > 1:
+        raise RuntimeError(
+            "Only one output mode is supported outside model_testing_mode."
+        )
     return requested
 
 
@@ -295,6 +318,10 @@ def resolve_run_options(
         overrides=overrides_use,
         run_mode=run_mode,
     )
+    output_modes = _resolve_output_modes(
+        overrides=overrides_use,
+        run_mode=run_mode,
+    )
     selected_models = _resolve_distillation_models(
         run_mode=run_mode,
         target_family=target_family,
@@ -355,5 +382,6 @@ def resolve_run_options(
         ),
         candidate_feature_sets=[spec.feature_set_id for spec in selected_feature_sets],
         model_families=model_families,
+        output_modes=output_modes,
         run_advanced_models=run_advanced_models,
     )

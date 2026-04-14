@@ -1,0 +1,74 @@
+feature_id,source,type,text,row_idx
+v25_p1,policy_induction_v25,policy,"Founders with deep technical expertise from one industry possess a unique advantage when applying it to disrupt a different, more traditional sector.",0
+v25_p11,policy_induction_v25,policy,"Founders with long careers managing small, slow-growth companies often lack the operational experience and mindset required to navigate the distinct challenges of achieving venture-backed hyper-growth and scale.",1
+v25_p38,policy_induction_v25,policy,"A founder's prior success leading a company to a significant exit or IPO is the strongest predictor of their ability to achieve repeatable, large-scale success.",2
+v25_p52,policy_induction_v25,policy,"Founders without significant, non-founding operational or industry experience have a lower probability of scaling a company to a large, successful outcome.",3
+v25_p55,policy_induction_v25,policy,"Leadership experience in an adjacent service industry is a weak predictor of success in capital-intensive manufacturing, often indicating gaps in critical operational and go-to-market expertise.",4
+v25_p58,policy_induction_v25,policy,"Prioritize founders with deep executive experience in their target industry, especially when combined with a prior successful company exit, as this de-risks both market and execution challenges.",5
+v25_p72,policy_induction_v25,policy,A long history of founding small businesses is a negative predictor for achieving the hyper-growth and massive scale required for top-tier venture outcomes.,6
+v25_p80,policy_induction_v25,policy,"General management experience is a negative signal when not paired with deep, recent, and relevant technical expertise required to innovate and scale at venture speed.",7
+v25_p112,policy_induction_v25,policy,Founders with careers limited to sales leadership at large companies often lack the crucial product-building and zero-to-one skills required for early-stage success.,8
+v25_p116,policy_induction_v25,policy,"Prioritize founders with deep, sustained expertise in their specific domain. A scattered professional history is a primary indicator of a fatal founder-market fit gap, correlating with failure.",9
+v25_p121,policy_induction_v25,policy,"Prioritize founders with a robust professional network (2000+ LinkedIn connections), indicating strong macro-market influence and effective access to capital/talent within high-growth digital micro-segments, especially when combined with deep technical expertise.",10
+v25_p135,policy_induction_v25,policy,"Founders in the 'Clinical & Diagnostic Healthcare' micro-market with a moderate professional network (e.g., 1000-2000 LinkedIn connections) are high risk if their network is primarily composed of academic peers and research collaborators, lacking robust connections to healthcare industry commercial leaders, experienced healthtech investors, or serial entrepreneurs.",11
+v25_p143,policy_induction_v25,policy,"Founders possessing diverse advanced degrees (e.g., MBA combined with PhD/MS in Biological Engineering, Food Science, or Functional Genomics), who demonstrate 6+ years of senior R&D or scientific leadership roles within large enterprises (500+ employees) in Biotechnology, and possessing a robust professional network (2000-5000 LinkedIn connections).",12
+v25_p150,policy_induction_v25,policy,"Favor companies operating in macro-markets experiencing significant secular tailwinds, such as resource demand in Extractive Industries, operational efficiency drives, or platform economy growth.",13
+v25_p157,policy_induction_v25,policy,"Favor founders whose professional experience includes venture capital or private equity roles, providing an investor-centric perspective and strategic understanding of funding and exit strategies.",14
+v25_p161,policy_induction_v25,policy,"Founders must have at least 2 years of direct technical contribution (e.g., Software Engineer, Research Scientist) within core technology stacks of high-growth micro-markets (e.g., AI/ML, SaaS Platforms, Cybersecurity), demonstrating critical impact on product development or foundational innovation.",15
+taste_A1_prior_acquisition,taste_policy_decomposition,policy,This founder has previously overseen or been involved in at least one acquisition as a founder.,16
+taste_A2_senior_role_large_co,taste_policy_decomposition,policy,"This founder held a senior or executive role (Director, VP, GM, C-suite, or equivalent) at a large company (1,000+ employees) before founding their current startup.",17
+taste_A3_top_phd,taste_policy_decomposition,policy,This founder has a PhD or postdoc from a top-tier university (QS rank 20 or better) in a technical or scientific field.,18
+taste_A4_repeat_founder,taste_policy_decomposition,policy,This founder is a repeat founder — they have previously founded or co-founded at least one other company before their current startup.,19
+taste_A5_deep_domain_expertise,taste_policy_decomposition,policy,"This founder has deep domain expertise: their professional experience is concentrated in the same industry as their current startup, with 5 or more years of relevant experience in that industry.",20
+taste_A6_clevel_mid_large_co,taste_policy_decomposition,policy,"This founder held a C-level role (CEO, CTO, CRO, CMO, COO, or equivalent) at a company with 200 or more employees.",21
+taste_A7_vc_investor_experience,taste_policy_decomposition,policy,"This founder has professional experience in venture capital, private equity, angel investing, or as a professional investor.",22
+taste_A8_prior_ipo,taste_policy_decomposition,policy,"This founder has an IPO (initial public offering) in their track record, either as a founder or as a senior executive at the company that went public.",23
+taste_R1_long_tenure_no_progression,taste_policy_decomposition,policy,This founder spent 10 or more years at a single company without reaching Director level or above.,24
+taste_R2_backoffice_roles,taste_policy_decomposition,policy,"This founder's most senior roles are in back-office, support, QA, or non-core functions (for example: QA lead, SDET, customer success manager, program manager, administrative roles) rather than product, engineering, research, or executive leadership.",25
+taste_R3_consulting_agency,taste_policy_decomposition,policy,"This founder's primary professional experience is in consulting, agencies, freelancing, or professional services rather than building products or technology companies.",26
+taste_R4_short_stints_unfocused,taste_policy_decomposition,policy,"This founder has multiple short stints (less than 2 years each) across unrelated industries, suggesting an unfocused or scattered career path.",27
+taste_R5_domain_mismatch,taste_policy_decomposition,policy,This founder's current startup is in an industry that is completely unrelated to any of their prior professional experience or education.,28
+taste_R6_low_rank_no_compensating,taste_policy_decomposition,policy,"This founder's highest degree is from a low-ranked institution (QS rank 200+) AND they have no other strong compensating signals such as senior leadership roles, prior exits, or C-level experience.",29
+taste_R7_junior_only,taste_policy_decomposition,policy,"This founder has only held junior-level roles throughout their career (analyst, intern, associate, junior engineer) with no progression to senior or leadership positions.",30
+taste_M1_elite_university,taste_policy_decomposition,policy,This founder has a degree from an elite university (QS rank 10 or better).,31
+taste_M2_10plus_years_experience,taste_policy_decomposition,policy,This founder has 10 or more years of total professional experience (sum of all roles listed).,32
+taste_M3_fast_career_velocity,taste_policy_decomposition,policy,"This founder shows fast career velocity: they progressed from individual contributor roles to Director, VP, or C-level within roughly 10 years of starting their career.",33
+taste_M4_tech_industry_startup,taste_policy_decomposition,policy,"This founder's current startup is in a technology-related industry (such as software, AI, cybersecurity, biotech, data analytics, cloud computing, robotics, or similar).",34
+taste_M5_very_large_company_exp,taste_policy_decomposition,policy,"This founder has worked at a very large company with 10,000 or more employees.",35
+rrf_Q000,rrf_vcbench_curated,rrf_question,Has the founder graduated from an institution ranked in the QS top 10?,36
+rrf_Q002,rrf_vcbench_curated,rrf_question,Has the founder held a C-level role in a startup or company?,37
+rrf_Q003,rrf_vcbench_curated,rrf_question,Has the founder served on a board of directors?,38
+rrf_Q008,rrf_vcbench_curated,rrf_question,Does the founder have experience in venture capital or private equity?,39
+rrf_Q009,rrf_vcbench_curated,rrf_question,Does the founder have at least 10 years of total professional experience?,40
+rrf_Q012,rrf_vcbench_curated,rrf_question,Is the founder involved in mentorship or advisory roles within their industry?,41
+rrf_Q014,rrf_vcbench_curated,rrf_question,"Did the founder's previous work experience include tenure at a company with over 10,000 employees?",42
+rrf_Q018,rrf_vcbench_curated,rrf_question,Has the founder served in an advisory role for over 4 years?,43
+rrf_Q020,rrf_vcbench_curated,rrf_question,Does the founder have domain expertise in their startup's industry for more than 5 years?,44
+rrf_Q023,rrf_vcbench_curated,rrf_question,Has the founder experienced rapid career progression within their roles?,45
+rrf_Q024,rrf_vcbench_curated,rrf_question,"Did the founder earn an advanced degree (MD, MBA, PhD) from an institution ranked in the top 50 by QS?",46
+rrf_Q025,rrf_vcbench_curated,rrf_question,Has the founder worked in the VC or PE industry?,47
+rrf_Q027,rrf_vcbench_curated,rrf_question,"Is the founder's highest degree a professional doctorate (e.g., PhD)?",48
+rrf_Q029,rrf_vcbench_curated,rrf_question,Does the founder have a degree in a STEM field?,49
+rrf_Q030,rrf_vcbench_curated,rrf_question,Does the founder possess a technical degree related to Engineering or Computer Science?,50
+rrf_Q031,rrf_vcbench_curated,rrf_question,Did the founder hold a technical position for over 6 years?,51
+rrf_Q034,rrf_vcbench_curated,rrf_question,Does the founder have experience in the Biotechnology sector?,52
+rrf_Q035,rrf_vcbench_curated,rrf_question,Has the founder worked in the Financial Services industry for over 2 years?,53
+rrf_Q036,rrf_vcbench_curated,rrf_question,Is the founder's undergraduate degree related to their current industry?,54
+rrf_Q037,rrf_vcbench_curated,rrf_question,Has the founder previously held a role as a CEO or managing director?,55
+le_has_high_qs_education,llm_engineering_set_05,llm_engineered,has high qs education,56
+le_industry_in_tech_or_health,llm_engineering_set_05,llm_engineered,industry in tech or health,57
+le_has_executive_experience,llm_engineering_set_05,llm_engineered,has executive experience,58
+le_has_ipo_or_acquisition,llm_engineering_set_05,llm_engineered,has ipo or acquisition,59
+le_has_graduate_degree,llm_engineering_set_05,llm_engineered,has graduate degree,60
+le_has_long_term_experience,llm_engineering_set_05,llm_engineered,has long term experience,61
+le_experienced_in_software_or_it,llm_engineering_set_05,llm_engineered,experienced in software or it,62
+le_industry_known,llm_engineering_set_05,llm_engineered,industry known,63
+le_has_education_in_ranked_institution,llm_engineering_set_05,llm_engineered,has education in ranked institution,64
+le_has_public_experience,llm_engineering_set_05,llm_engineered,has public experience,65
+le_industry_has_ipo,llm_engineering_set_05,llm_engineered,industry has ipo,66
+le_industry_has_acquisition,llm_engineering_set_05,llm_engineered,industry has acquisition,67
+le_founder_has_bachelor_or_higher,llm_engineering_set_05,llm_engineered,founder has bachelor or higher,68
+le_industry_in_health_or_biotech,llm_engineering_set_05,llm_engineered,industry in health or biotech,69
+le_has_experience_in_startup_roles,llm_engineering_set_05,llm_engineered,has experience in startup roles,70
+le_industry_has_long_history,llm_engineering_set_05,llm_engineered,industry has long history,71
+le_founder_has_multidisciplinary_education,llm_engineering_set_05,llm_engineered,founder has multidisciplinary education,72

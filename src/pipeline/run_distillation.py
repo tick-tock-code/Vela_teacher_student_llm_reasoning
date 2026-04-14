@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model families for model_testing_mode: linear_l2, xgb1, mlp, elasticnet, randomforest.",
     )
     parser.add_argument(
+        "--output-modes",
+        nargs="*",
+        help="Output modes for model_testing_mode: single_target, multi_output.",
+    )
+    parser.add_argument(
         "--run-advanced-models",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -129,6 +134,11 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
         model_families=(
             [str(item) for item in args.model_families]
             if args.model_families
+            else None
+        ),
+        output_modes=(
+            [str(item) for item in args.output_modes]
+            if args.output_modes
             else None
         ),
         run_advanced_models=args.run_advanced_models,

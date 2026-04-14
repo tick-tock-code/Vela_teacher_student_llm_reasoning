@@ -35,6 +35,7 @@ class LauncherSelections:
     save_reasoning_predictions: bool | None = None
     candidate_feature_sets: list[str] | None = None
     model_families: list[str] | None = None
+    output_modes: list[str] | None = None
     run_advanced_models: bool | None = None
 
 
@@ -54,6 +55,7 @@ def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
         save_reasoning_predictions=selections.save_reasoning_predictions,
         candidate_feature_sets=selections.candidate_feature_sets,
         model_families=selections.model_families,
+        output_modes=selections.output_modes,
         run_advanced_models=selections.run_advanced_models,
     )
 
@@ -109,6 +111,10 @@ class RunLauncher(ttk.Frame):
             "mlp": tk.BooleanVar(value=True),
             "elasticnet": tk.BooleanVar(value=True),
             "randomforest": tk.BooleanVar(value=True),
+        }
+        self.mt_output_mode_vars: dict[str, tk.BooleanVar] = {
+            "single_target": tk.BooleanVar(value=True),
+            "multi_output": tk.BooleanVar(value=False),
         }
 
         self._build_ui()
@@ -274,6 +280,7 @@ class RunLauncher(ttk.Frame):
 
     def _build_testing_tab(self) -> None:
         self.testing_tab.columnconfigure(1, weight=1)
+        self.testing_tab.columnconfigure(2, weight=1)
         ttk.Label(self.testing_tab, text="Target family").grid(row=0, column=0, sticky="w")
         self.mt_target_combo = ttk.Combobox(
             self.testing_tab,
@@ -284,8 +291,8 @@ class RunLauncher(ttk.Frame):
         )
         self.mt_target_combo.grid(row=0, column=1, sticky="w")
         self.mt_target_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_mt_target_preview())
-        ttk.Label(self.testing_tab, textvariable=self.mt_target_preview_var, wraplength=760, justify="left").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        ttk.Label(self.testing_tab, textvariable=self.mt_target_preview_var, wraplength=920, justify="left").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
         candidates = ttk.LabelFrame(self.testing_tab, text="Candidate Feature Sets")
@@ -305,8 +312,21 @@ class RunLauncher(ttk.Frame):
         ):
             ttk.Checkbutton(families, text=label, variable=self.mt_model_family_vars[key]).grid(row=row, column=0, sticky="w")
 
+        output_types = ttk.LabelFrame(self.testing_tab, text="Output Types")
+        output_types.grid(row=2, column=2, sticky="nsew", padx=(8, 0), pady=(8, 8))
+        ttk.Checkbutton(
+            output_types,
+            text="16 single-target models",
+            variable=self.mt_output_mode_vars["single_target"],
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            output_types,
+            text="1 multi-output model",
+            variable=self.mt_output_mode_vars["multi_output"],
+        ).grid(row=1, column=0, sticky="w")
+
         settings = ttk.LabelFrame(self.testing_tab, text="Settings")
-        settings.grid(row=3, column=0, columnspan=2, sticky="ew")
+        settings.grid(row=3, column=0, columnspan=3, sticky="ew")
         settings.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             settings,
@@ -349,6 +369,8 @@ class RunLauncher(ttk.Frame):
         self.mt_repeat_cv_var.set(False)
         self.mt_repeat_count_var.set("1")
         self.mt_run_advanced_var.set(bool(config.model_testing.run_advanced_models_default))
+        self.mt_output_mode_vars["single_target"].set(True)
+        self.mt_output_mode_vars["multi_output"].set(False)
 
         for spec in config.intermediary_features:
             if spec.kind.startswith("sentence_transformer") and spec.embedding_model_name:
@@ -544,6 +566,7 @@ class RunLauncher(ttk.Frame):
             save_reasoning_predictions=False,
             candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
             model_families=[key for key, var in self.mt_model_family_vars.items() if var.get()],
+            output_modes=[key for key, var in self.mt_output_mode_vars.items() if var.get()],
             run_advanced_models=bool(self.mt_run_advanced_var.get()),
             **common,
         )
@@ -574,6 +597,8 @@ class RunLauncher(ttk.Frame):
                 raise ValueError("Select at least one candidate feature set.")
             if not selections.model_families:
                 raise ValueError("Select at least one model family.")
+            if not selections.output_modes:
+                raise ValueError("Select at least one output type.")
             if selections.repeat_cv_with_new_seeds and (selections.cv_seed_repeat_count or 0) < 2:
                 raise ValueError("Repeat count must be >= 2 when repeat CV is enabled.")
         except ValueError as exc:

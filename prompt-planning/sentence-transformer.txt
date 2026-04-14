@@ -1,0 +1,9 @@
+Sentence Transformers, available at: pip install sentence-transformers
+
+It's been suggested that, to make a black-box style ML model, I could use sentence transformers on the anonymised prose (or other) sections of the VCBench dataset. The idea being, that by turning sentences into tokens, we can extract meaning out of natural language. 
+
+I don't know how we would define a regression, XGBoost, or an MLP that takes in text of variable length though. How is this done with sentence transformers? How should we do this?
+
+The motivation here, is that an LLM will look at the text by turning it into tokens, and then thinking and producing the reasoning feature. If I define a model that breaks down a sentence into the same tokens, I can then see if a lightweight model could process that information to produce reasoning features in a similar way.
+
+
