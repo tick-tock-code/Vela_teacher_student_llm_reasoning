@@ -485,6 +485,15 @@
     "run_advanced_models_default": false,
     "screening_repeat_cv_count": 3,
     "screening_score_delta": 0.005,
-    "max_recommended_feature_sets": 3
+    "max_recommended_feature_sets": 3,
+    "xgb_calibration_estimators": [
+      40,
+      80,
+      120,
+      180,
+      240,
+      320
+    ],
+    "use_latest_xgb_calibration_default": false
   }
 }

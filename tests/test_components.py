@@ -34,6 +34,7 @@ from src.pipeline.model_testing import (
 from src.pipeline.config import FeatureSetSpec, load_experiment_config
 from src.pipeline.run_distillation import parse_run_overrides
 from src.pipeline.run_options import RunOverrides, resolve_run_options
+from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 
 
 def _workspace_temp_dir() -> Path:
@@ -434,6 +435,64 @@ class ComponentTests(unittest.TestCase):
             ),
         )
         self.assertEqual(resolved.output_modes, ["single_target", "multi_output"])
+
+    def test_xgb_calibration_mode_resolves_xgb_only_and_disables_heldout(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="xgb_calibration_mode",
+                target_family="v25_policies",
+                candidate_feature_sets=["sentence_bundle"],
+            ),
+        )
+        self.assertEqual(resolved.run_mode, "xgb_calibration_mode")
+        self.assertFalse(resolved.heldout_evaluation)
+        self.assertEqual([spec.model_id for spec in resolved.distillation_models], ["xgb1_regressor"])
+        self.assertEqual(resolved.output_modes, ["single_target"])
+        self.assertEqual(resolved.model_families, ["xgb1"])
+
+    def test_cli_parsing_supports_xgb_calibration_flags(self) -> None:
+        overrides = parse_run_overrides(
+            [
+                "--config",
+                "experiments/teacher_student_distillation_v1.json",
+                "--run-mode",
+                "xgb_calibration_mode",
+                "--target-family",
+                "v25_and_taste",
+                "--candidate-feature-sets",
+                "hq_plus_sentence_bundle",
+                "lambda_policies_plus_sentence_bundle",
+                "--xgb-calibration-estimators",
+                "40",
+                "80",
+                "120",
+                "--use-latest-xgb-calibration",
+            ]
+        )
+        self.assertEqual(overrides.run_mode, "xgb_calibration_mode")
+        self.assertEqual(overrides.target_family, "v25_and_taste")
+        self.assertEqual(overrides.candidate_feature_sets, ["hq_plus_sentence_bundle", "lambda_policies_plus_sentence_bundle"])
+        self.assertEqual(overrides.xgb_calibration_estimators, [40, 80, 120])
+        self.assertTrue(overrides.use_latest_xgb_calibration)
+
+    def test_model_testing_mode_can_enable_latest_xgb_calibration_toggle(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="model_testing_mode",
+                target_family="v25_policies",
+                candidate_feature_sets=["sentence_bundle"],
+                model_families=["xgb1"],
+                use_latest_xgb_calibration=True,
+            ),
+        )
+        self.assertTrue(resolved.use_latest_xgb_calibration)
+
+    def test_load_latest_xgb_calibration_returns_none_when_missing(self) -> None:
+        self.assertIsNone(load_latest_xgb_calibration("definitely_missing_experiment_for_test"))
 
     def test_screening_score_rule_marks_top_set_and_close_runners(self) -> None:
         repeat_metrics = pd.DataFrame(

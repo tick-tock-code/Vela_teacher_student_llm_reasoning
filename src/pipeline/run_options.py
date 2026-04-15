@@ -11,6 +11,7 @@ from src.pipeline.config import (
     SUPPORTED_MODEL_TESTING_FAMILIES,
     TargetFamilySpec,
 )
+from src.utils.parallel import resolve_max_parallel_workers
 
 
 DEFAULT_CONFIG_PATH = "experiments/teacher_student_distillation_v1.json"
@@ -53,6 +54,10 @@ class RunOverrides:
     model_families: list[str] | None = None
     output_modes: list[str] | None = None
     run_advanced_models: bool | None = None
+    xgb_calibration_estimators: list[int] | None = None
+    use_latest_xgb_calibration: bool | None = None
+    xgb_model_param_overrides_by_model_id: dict[str, dict[str, float | int]] | None = None
+    max_parallel_workers: int | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,10 @@ class ResolvedRunOptions:
     model_families: list[str]
     output_modes: list[str]
     run_advanced_models: bool
+    xgb_calibration_estimators: list[int]
+    use_latest_xgb_calibration: bool
+    xgb_model_param_overrides_by_model_id: dict[str, dict[str, float | int]]
+    max_parallel_workers: int
 
 
 def _require_known_subset(
@@ -96,7 +105,7 @@ def _feature_set_requested_ids(
 ) -> list[str]:
     if overrides.candidate_feature_sets is not None:
         return [value for value in overrides.candidate_feature_sets]
-    if run_mode == "model_testing_mode":
+    if run_mode in {"model_testing_mode", "xgb_calibration_mode"}:
         return list(config.model_testing.candidate_feature_sets)
     return [spec.feature_set_id for spec in config.distillation_feature_sets]
 
@@ -111,7 +120,7 @@ def _resolve_requested_feature_banks(
 ) -> list[str]:
     if overrides.active_feature_banks is not None:
         return [value for value in overrides.active_feature_banks]
-    if run_mode != "model_testing_mode":
+    if run_mode not in {"model_testing_mode", "xgb_calibration_mode"}:
         return sorted(available_feature_bank_ids)
 
     feature_set_map = {spec.feature_set_id: spec for spec in config.distillation_feature_sets}
@@ -127,6 +136,8 @@ def _resolve_model_families(
     overrides: RunOverrides,
     run_mode: str,
 ) -> list[str]:
+    if run_mode == "xgb_calibration_mode":
+        return ["xgb1"]
     if run_mode != "model_testing_mode":
         return []
     requested = (
@@ -149,6 +160,8 @@ def _resolve_output_modes(
     overrides: RunOverrides,
     run_mode: str,
 ) -> list[str]:
+    if run_mode == "xgb_calibration_mode":
+        return ["single_target"]
     requested = list(overrides.output_modes) if overrides.output_modes is not None else ["single_target"]
     _require_known_subset(
         requested,
@@ -197,6 +210,16 @@ def _resolve_distillation_models(
                 available=available_ids,
                 label="distillation models",
             )
+    elif run_mode == "xgb_calibration_mode":
+        requested_ids = [
+            "xgb1_regressor" if target_family.task_kind == "regression" else "xgb1_classifier"
+        ]
+        missing = [model_id for model_id in requested_ids if model_id not in available_ids]
+        if missing:
+            raise RuntimeError(
+                "xgb_calibration_mode requested model ids that are not configured in distillation_models: "
+                f"{missing}"
+            )
     else:
         model_map = MODEL_FAMILY_TO_MODEL_ID[target_family.task_kind]
         requested_ids = [model_map[family] for family in model_families]
@@ -222,7 +245,7 @@ def resolve_run_options(
     overrides_use = overrides or RunOverrides()
 
     run_mode = overrides_use.run_mode or config.defaults.run_mode
-    if run_mode not in {"reproduction_mode", "reasoning_distillation_mode", "model_testing_mode"}:
+    if run_mode not in {"reproduction_mode", "reasoning_distillation_mode", "model_testing_mode", "xgb_calibration_mode"}:
         raise RuntimeError(f"Unsupported run_mode '{run_mode}'.")
 
     target_family_id = overrides_use.target_family or config.defaults.target_family
@@ -242,6 +265,8 @@ def resolve_run_options(
     if run_mode == "reproduction_mode":
         heldout_evaluation = True
     if run_mode == "model_testing_mode":
+        heldout_evaluation = False
+    if run_mode == "xgb_calibration_mode":
         heldout_evaluation = False
 
     available_repository_banks = [spec for spec in config.repository_feature_banks if spec.enabled]
@@ -360,6 +385,24 @@ def resolve_run_options(
         if overrides_use.run_advanced_models is None
         else bool(overrides_use.run_advanced_models)
     )
+    if run_mode == "xgb_calibration_mode":
+        run_advanced_models = False
+
+    xgb_calibration_estimators = (
+        [int(value) for value in overrides_use.xgb_calibration_estimators]
+        if overrides_use.xgb_calibration_estimators is not None
+        else list(config.model_testing.xgb_calibration_estimators)
+    )
+    if not xgb_calibration_estimators or any(value <= 0 for value in xgb_calibration_estimators):
+        raise RuntimeError("xgb calibration estimators must be a non-empty list of positive integers.")
+
+    use_latest_xgb_calibration = (
+        config.model_testing.use_latest_xgb_calibration_default
+        if overrides_use.use_latest_xgb_calibration is None
+        else bool(overrides_use.use_latest_xgb_calibration)
+    )
+    if run_mode == "xgb_calibration_mode":
+        use_latest_xgb_calibration = False
 
     return ResolvedRunOptions(
         config_path=overrides_use.config_path,
@@ -384,4 +427,8 @@ def resolve_run_options(
         model_families=model_families,
         output_modes=output_modes,
         run_advanced_models=run_advanced_models,
+        xgb_calibration_estimators=xgb_calibration_estimators,
+        use_latest_xgb_calibration=use_latest_xgb_calibration,
+        xgb_model_param_overrides_by_model_id=dict(overrides_use.xgb_model_param_overrides_by_model_id or {}),
+        max_parallel_workers=resolve_max_parallel_workers(overrides_use.max_parallel_workers),
     )

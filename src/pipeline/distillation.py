@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Callable
@@ -33,6 +34,7 @@ from src.student.reasoning_regression import (
     train_reasoning_regressors_oof,
 )
 from src.utils.artifact_io import timestamped_run_dir, write_csv, write_json, write_markdown
+from src.utils.parallel import bounded_worker_count
 from src.utils.paths import RUNS_DIR
 
 
@@ -122,6 +124,13 @@ def _average_threshold_maps(
         values = [threshold_map[key] for threshold_map in threshold_maps if key in threshold_map]
         averaged[key] = float(np.mean(values))
     return averaged
+
+
+def _model_param_overrides_for(
+    resolved_run,
+    model_id: str,
+) -> dict[str, float | int]:
+    return dict((resolved_run.xgb_model_param_overrides_by_model_id or {}).get(model_id, {}))
 
 
 def _render_reasoning_metrics_summary(
@@ -356,6 +365,197 @@ def _select_best_params_classification(
     return best_candidate
 
 
+def _train_nested_single_target_regression_oof(
+    *,
+    X_public: np.ndarray,
+    y: np.ndarray,
+    target_column: str,
+    model_spec,
+    model_offset: int,
+    splits: list,
+    repeat_seed: int,
+    inner_n_splits: int,
+    inner_shuffle: bool,
+    scale_min: float,
+    scale_max: float,
+) -> tuple[str, np.ndarray, list[dict[str, object]]]:
+    column_name = f"{target_column}__{model_spec.model_id}"
+    oof = np.full(len(X_public), np.nan, dtype=float)
+    metric_rows: list[dict[str, object]] = []
+    for fold_offset, split in enumerate(splits):
+        X_train = X_public[split.train_idx]
+        X_test = X_public[split.test_idx]
+        y_train = y[split.train_idx]
+        y_test = y[split.test_idx]
+        best_params = _select_best_params_regression(
+            X_train,
+            y_train,
+            model_kind=model_spec.kind,
+            random_state=repeat_seed + model_offset + fold_offset,
+            inner_n_splits=inner_n_splits,
+            inner_shuffle=inner_shuffle,
+        )
+        model = build_reasoning_regressor(
+            model_spec.kind,
+            random_state=repeat_seed + model_offset + fold_offset,
+            param_overrides=best_params,
+        )
+        model.fit(X_train, y_train)
+        preds = np.clip(
+            model.predict(X_test),
+            scale_min,
+            scale_max,
+        )
+        oof[split.test_idx] = preds
+        metric_rows.append(
+            {
+                "target_id": target_column,
+                "model_id": model_spec.model_id,
+                "split_id": split.split_id,
+                **regression_metrics(y_test, preds),
+            }
+        )
+    if np.isnan(oof).any():
+        raise RuntimeError(
+            f"Nested distillation OOF contains NaNs for target '{target_column}' and model '{model_spec.model_id}'."
+        )
+    metric_rows.append(
+        {
+            "target_id": target_column,
+            "model_id": model_spec.model_id,
+            "split_id": "oof_overall",
+            **regression_metrics(y, oof),
+        }
+    )
+    return column_name, oof, metric_rows
+
+
+def _train_nested_single_target_classification_oof(
+    *,
+    X_public: np.ndarray,
+    y: np.ndarray,
+    target_column: str,
+    model_spec,
+    model_offset: int,
+    splits: list,
+    repeat_seed: int,
+    inner_n_splits: int,
+    inner_shuffle: bool,
+) -> tuple[str, np.ndarray, tuple[str, str], float, list[dict[str, object]]]:
+    column_name = f"{target_column}__{model_spec.model_id}"
+    oof = np.full(len(X_public), np.nan, dtype=float)
+    fold_probs: dict[str, np.ndarray] = {}
+    metric_rows: list[dict[str, object]] = []
+    for fold_offset, split in enumerate(splits):
+        X_train = X_public[split.train_idx]
+        X_test = X_public[split.test_idx]
+        y_train = y[split.train_idx]
+        best_params = _select_best_params_classification(
+            X_train,
+            y_train,
+            model_kind=model_spec.kind,
+            random_state=repeat_seed + model_offset + fold_offset,
+            inner_n_splits=inner_n_splits,
+            inner_shuffle=inner_shuffle,
+        )
+        model = build_reasoning_classifier(
+            model_spec.kind,
+            random_state=repeat_seed + model_offset + fold_offset,
+            param_overrides=best_params,
+        )
+        model.fit(X_train, y_train)
+        probs = model.predict_proba(X_test)[:, 1]
+        oof[split.test_idx] = probs
+        fold_probs[split.split_id] = probs
+    if np.isnan(oof).any():
+        raise RuntimeError(
+            f"Nested distillation OOF contains NaNs for target '{target_column}' and model '{model_spec.model_id}'."
+        )
+    threshold = select_f05_threshold(y, oof)
+    for split in splits:
+        metric_rows.append(
+            {
+                "target_id": target_column,
+                "model_id": model_spec.model_id,
+                "split_id": split.split_id,
+                **binary_classification_metrics(
+                    y[split.test_idx],
+                    fold_probs[split.split_id],
+                    threshold=threshold,
+                ),
+            }
+        )
+    metric_rows.append(
+        {
+            "target_id": target_column,
+            "model_id": model_spec.model_id,
+            "split_id": "oof_overall",
+            **binary_classification_metrics(y, oof, threshold=threshold),
+        }
+    )
+    return column_name, oof, (target_column, model_spec.model_id), threshold, metric_rows
+
+
+def _fit_nested_single_target_regression_full(
+    *,
+    X_public: np.ndarray,
+    y_train_full: np.ndarray,
+    target_column: str,
+    model_spec,
+    model_offset: int,
+    target_offset: int,
+    inner_n_splits: int,
+    inner_shuffle: bool,
+    random_state_base: int,
+) -> tuple[tuple[str, str], object]:
+    random_state = random_state_base + model_offset + target_offset
+    best_params = _select_best_params_regression(
+        X_public,
+        y_train_full,
+        model_kind=model_spec.kind,
+        random_state=random_state,
+        inner_n_splits=inner_n_splits,
+        inner_shuffle=inner_shuffle,
+    )
+    model = build_reasoning_regressor(
+        model_spec.kind,
+        random_state=random_state,
+        param_overrides=best_params,
+    )
+    model.fit(X_public, y_train_full)
+    return (target_column, model_spec.model_id), model
+
+
+def _fit_nested_single_target_classification_full(
+    *,
+    X_public: np.ndarray,
+    y_train_full: np.ndarray,
+    target_column: str,
+    model_spec,
+    model_offset: int,
+    target_offset: int,
+    inner_n_splits: int,
+    inner_shuffle: bool,
+    random_state_base: int,
+) -> tuple[tuple[str, str], object]:
+    random_state = random_state_base + model_offset + target_offset
+    best_params = _select_best_params_classification(
+        X_public,
+        y_train_full,
+        model_kind=model_spec.kind,
+        random_state=random_state,
+        inner_n_splits=inner_n_splits,
+        inner_shuffle=inner_shuffle,
+    )
+    model = build_reasoning_classifier(
+        model_spec.kind,
+        random_state=random_state,
+        param_overrides=best_params,
+    )
+    model.fit(X_public, y_train_full)
+    return (target_column, model_spec.model_id), model
+
+
 def _evaluate_heldout_regression_predictions(
     *,
     feature_set_id: str,
@@ -523,6 +723,8 @@ def run_reasoning_distillation_mode(
                     random_state=repeat_seed,
                     scale_min=target_family.scale_min or 0.0,
                     scale_max=target_family.scale_max or 1.0,
+                    model_param_overrides_by_model_id=resolved_run.xgb_model_param_overrides_by_model_id,
+                    max_parallel_workers=resolved_run.max_parallel_workers,
                 )
                 output_prediction_tables.append(outputs.oof_predictions)
                 output_metric_tables.append(outputs.metrics.copy())
@@ -535,125 +737,116 @@ def run_reasoning_distillation_mode(
                     model_specs=resolved_run.distillation_models,
                     splits=splits,
                     random_state=repeat_seed,
+                    model_param_overrides_by_model_id=resolved_run.xgb_model_param_overrides_by_model_id,
+                    max_parallel_workers=resolved_run.max_parallel_workers,
                 )
                 output_prediction_tables.append(outputs.oof_predictions)
                 output_metric_tables.append(outputs.metrics.copy())
                 output_threshold_maps.append(outputs.selected_thresholds)
             elif target_family.task_kind == "regression":
-                metric_rows: list[dict[str, object]] = []
                 oof_predictions = pd.DataFrame({"founder_uuid": founder_ids_public})
+                tasks: list[tuple[str, np.ndarray, int, object]] = []
                 for target_column in target_columns:
                     y = public_target_rows[target_column].to_numpy(dtype=float)
                     for model_offset, model_spec in enumerate(resolved_run.distillation_models):
-                        column_name = f"{target_column}__{model_spec.model_id}"
-                        oof = np.full(len(X_public), np.nan, dtype=float)
-                        for fold_offset, split in enumerate(splits):
-                            X_train = X_public[split.train_idx]
-                            X_test = X_public[split.test_idx]
-                            y_train = y[split.train_idx]
-                            y_test = y[split.test_idx]
-                            best_params = _select_best_params_regression(
-                                X_train,
-                                y_train,
-                                model_kind=model_spec.kind,
-                                random_state=repeat_seed + model_offset + fold_offset,
-                                inner_n_splits=config.reproduction.inner_cv.n_splits,
-                                inner_shuffle=config.reproduction.inner_cv.shuffle,
-                            )
-                            model = build_reasoning_regressor(
-                                model_spec.kind,
-                                random_state=repeat_seed + model_offset + fold_offset,
-                                param_overrides=best_params,
-                            )
-                            model.fit(X_train, y_train)
-                            preds = np.clip(
-                                model.predict(X_test),
-                                target_family.scale_min or 0.0,
-                                target_family.scale_max or 1.0,
-                            )
-                            oof[split.test_idx] = preds
-                            metric_rows.append(
-                                {
-                                    "target_id": target_column,
-                                    "model_id": model_spec.model_id,
-                                    "split_id": split.split_id,
-                                    **regression_metrics(y_test, preds),
-                                }
-                            )
-                        if np.isnan(oof).any():
-                            raise RuntimeError(
-                                f"Nested distillation OOF contains NaNs for target '{target_column}' and model '{model_spec.model_id}'."
-                            )
-                        oof_predictions[column_name] = oof
-                        metric_rows.append(
-                            {
-                                "target_id": target_column,
-                                "model_id": model_spec.model_id,
-                                "split_id": "oof_overall",
-                                **regression_metrics(y, oof),
-                            }
+                        tasks.append((target_column, y, model_offset, model_spec))
+                workers = bounded_worker_count(
+                    max_parallel_workers=resolved_run.max_parallel_workers,
+                    task_count=len(tasks),
+                )
+                if workers == 1:
+                    task_outputs = [
+                        _train_nested_single_target_regression_oof(
+                            X_public=X_public,
+                            y=y,
+                            target_column=target_column,
+                            model_spec=model_spec,
+                            model_offset=model_offset,
+                            splits=splits,
+                            repeat_seed=repeat_seed,
+                            inner_n_splits=config.reproduction.inner_cv.n_splits,
+                            inner_shuffle=config.reproduction.inner_cv.shuffle,
+                            scale_min=target_family.scale_min or 0.0,
+                            scale_max=target_family.scale_max or 1.0,
                         )
+                        for target_column, y, model_offset, model_spec in tasks
+                    ]
+                else:
+                    with ThreadPoolExecutor(max_workers=workers) as executor:
+                        task_outputs = list(
+                            executor.map(
+                                lambda task: _train_nested_single_target_regression_oof(
+                                    X_public=X_public,
+                                    y=task[1],
+                                    target_column=task[0],
+                                    model_spec=task[3],
+                                    model_offset=task[2],
+                                    splits=splits,
+                                    repeat_seed=repeat_seed,
+                                    inner_n_splits=config.reproduction.inner_cv.n_splits,
+                                    inner_shuffle=config.reproduction.inner_cv.shuffle,
+                                    scale_min=target_family.scale_min or 0.0,
+                                    scale_max=target_family.scale_max or 1.0,
+                                ),
+                                tasks,
+                            )
+                        )
+                metric_rows: list[dict[str, object]] = []
+                for column_name, oof, task_metric_rows in task_outputs:
+                    oof_predictions[column_name] = oof
+                    metric_rows.extend(task_metric_rows)
                 output_prediction_tables.append(oof_predictions)
                 output_metric_tables.append(pd.DataFrame(metric_rows))
             else:
-                metric_rows = []
                 oof_predictions = pd.DataFrame({"founder_uuid": founder_ids_public})
                 thresholds_for_repeat: dict[tuple[str, str], float] = {}
+                tasks: list[tuple[str, np.ndarray, int, object]] = []
                 for target_column in target_columns:
                     y = public_target_rows[target_column].to_numpy(dtype=int)
                     for model_offset, model_spec in enumerate(resolved_run.distillation_models):
-                        column_name = f"{target_column}__{model_spec.model_id}"
-                        oof = np.full(len(X_public), np.nan, dtype=float)
-                        fold_probs: dict[str, np.ndarray] = {}
-                        for fold_offset, split in enumerate(splits):
-                            X_train = X_public[split.train_idx]
-                            X_test = X_public[split.test_idx]
-                            y_train = y[split.train_idx]
-                            best_params = _select_best_params_classification(
-                                X_train,
-                                y_train,
-                                model_kind=model_spec.kind,
-                                random_state=repeat_seed + model_offset + fold_offset,
-                                inner_n_splits=config.reproduction.inner_cv.n_splits,
-                                inner_shuffle=config.reproduction.inner_cv.shuffle,
-                            )
-                            model = build_reasoning_classifier(
-                                model_spec.kind,
-                                random_state=repeat_seed + model_offset + fold_offset,
-                                param_overrides=best_params,
-                            )
-                            model.fit(X_train, y_train)
-                            probs = model.predict_proba(X_test)[:, 1]
-                            oof[split.test_idx] = probs
-                            fold_probs[split.split_id] = probs
-                        if np.isnan(oof).any():
-                            raise RuntimeError(
-                                f"Nested distillation OOF contains NaNs for target '{target_column}' and model '{model_spec.model_id}'."
-                            )
-                        threshold = select_f05_threshold(y, oof)
-                        thresholds_for_repeat[(target_column, model_spec.model_id)] = threshold
-                        oof_predictions[column_name] = oof
-                        for split in splits:
-                            metric_rows.append(
-                                {
-                                    "target_id": target_column,
-                                    "model_id": model_spec.model_id,
-                                    "split_id": split.split_id,
-                                    **binary_classification_metrics(
-                                        y[split.test_idx],
-                                        fold_probs[split.split_id],
-                                        threshold=threshold,
-                                    ),
-                                }
-                            )
-                        metric_rows.append(
-                            {
-                                "target_id": target_column,
-                                "model_id": model_spec.model_id,
-                                "split_id": "oof_overall",
-                                **binary_classification_metrics(y, oof, threshold=threshold),
-                            }
+                        tasks.append((target_column, y, model_offset, model_spec))
+                workers = bounded_worker_count(
+                    max_parallel_workers=resolved_run.max_parallel_workers,
+                    task_count=len(tasks),
+                )
+                if workers == 1:
+                    task_outputs = [
+                        _train_nested_single_target_classification_oof(
+                            X_public=X_public,
+                            y=y,
+                            target_column=target_column,
+                            model_spec=model_spec,
+                            model_offset=model_offset,
+                            splits=splits,
+                            repeat_seed=repeat_seed,
+                            inner_n_splits=config.reproduction.inner_cv.n_splits,
+                            inner_shuffle=config.reproduction.inner_cv.shuffle,
                         )
+                        for target_column, y, model_offset, model_spec in tasks
+                    ]
+                else:
+                    with ThreadPoolExecutor(max_workers=workers) as executor:
+                        task_outputs = list(
+                            executor.map(
+                                lambda task: _train_nested_single_target_classification_oof(
+                                    X_public=X_public,
+                                    y=task[1],
+                                    target_column=task[0],
+                                    model_spec=task[3],
+                                    model_offset=task[2],
+                                    splits=splits,
+                                    repeat_seed=repeat_seed,
+                                    inner_n_splits=config.reproduction.inner_cv.n_splits,
+                                    inner_shuffle=config.reproduction.inner_cv.shuffle,
+                                ),
+                                tasks,
+                            )
+                        )
+                metric_rows: list[dict[str, object]] = []
+                for column_name, oof, threshold_key, threshold, task_metric_rows in task_outputs:
+                    oof_predictions[column_name] = oof
+                    thresholds_for_repeat[threshold_key] = threshold
+                    metric_rows.extend(task_metric_rows)
                 output_prediction_tables.append(oof_predictions)
                 output_metric_tables.append(pd.DataFrame(metric_rows))
                 output_threshold_maps.append(thresholds_for_repeat)
@@ -689,25 +882,56 @@ def run_reasoning_distillation_mode(
 
             if target_family.task_kind == "regression":
                 if resolved_run.distillation_nested_sweep:
-                    fitted_models = {}
+                    fit_tasks: list[tuple[str, np.ndarray, int, int, object]] = []
                     for model_offset, model_spec in enumerate(resolved_run.distillation_models):
                         for target_offset, target_column in enumerate(target_columns):
-                            y_train_full = public_target_rows[target_column].to_numpy(dtype=float)
-                            best_params = _select_best_params_regression(
-                                X_public,
-                                y_train_full,
-                                model_kind=model_spec.kind,
-                                random_state=config.distillation_cv.random_state + model_offset + target_offset,
+                            fit_tasks.append(
+                                (
+                                    target_column,
+                                    public_target_rows[target_column].to_numpy(dtype=float),
+                                    model_offset,
+                                    target_offset,
+                                    model_spec,
+                                )
+                            )
+                    workers = bounded_worker_count(
+                        max_parallel_workers=resolved_run.max_parallel_workers,
+                        task_count=len(fit_tasks),
+                    )
+                    if workers == 1:
+                        fitted_pairs = [
+                            _fit_nested_single_target_regression_full(
+                                X_public=X_public,
+                                y_train_full=y_train_full,
+                                target_column=target_column,
+                                model_spec=model_spec,
+                                model_offset=model_offset,
+                                target_offset=target_offset,
                                 inner_n_splits=config.reproduction.inner_cv.n_splits,
                                 inner_shuffle=config.reproduction.inner_cv.shuffle,
+                                random_state_base=config.distillation_cv.random_state,
                             )
-                            model = build_reasoning_regressor(
-                                model_spec.kind,
-                                random_state=config.distillation_cv.random_state + model_offset + target_offset,
-                                param_overrides=best_params,
+                            for target_column, y_train_full, model_offset, target_offset, model_spec in fit_tasks
+                        ]
+                    else:
+                        with ThreadPoolExecutor(max_workers=workers) as executor:
+                            fitted_pairs = list(
+                                executor.map(
+                                    lambda task: _fit_nested_single_target_regression_full(
+                                        X_public=X_public,
+                                        y_train_full=task[1],
+                                        target_column=task[0],
+                                        model_spec=task[4],
+                                        model_offset=task[2],
+                                        target_offset=task[3],
+                                        inner_n_splits=config.reproduction.inner_cv.n_splits,
+                                        inner_shuffle=config.reproduction.inner_cv.shuffle,
+                                        random_state_base=config.distillation_cv.random_state,
+                                    ),
+                                    fit_tasks,
+                                )
                             )
-                            model.fit(X_public, y_train_full)
-                            fitted_models[(target_column, model_spec.model_id)] = model
+                    fitted_models = dict(fitted_pairs)
                 else:
                     fitted_models = fit_reasoning_regressors_full(
                         feature_set.public_frame[feature_set.feature_columns],
@@ -715,6 +939,8 @@ def run_reasoning_distillation_mode(
                         target_columns=target_columns,
                         model_specs=resolved_run.distillation_models,
                         random_state=config.distillation_cv.random_state,
+                        model_param_overrides_by_model_id=resolved_run.xgb_model_param_overrides_by_model_id,
+                        max_parallel_workers=resolved_run.max_parallel_workers,
                     )
                 heldout_predictions = predict_reasoning_regressors_full(
                     heldout_feature_rows[feature_set.feature_columns],
@@ -737,25 +963,56 @@ def run_reasoning_distillation_mode(
                     )
             else:
                 if resolved_run.distillation_nested_sweep:
-                    fitted_models = {}
+                    fit_tasks: list[tuple[str, np.ndarray, int, int, object]] = []
                     for model_offset, model_spec in enumerate(resolved_run.distillation_models):
                         for target_offset, target_column in enumerate(target_columns):
-                            y_train_full = public_target_rows[target_column].to_numpy(dtype=int)
-                            best_params = _select_best_params_classification(
-                                X_public,
-                                y_train_full,
-                                model_kind=model_spec.kind,
-                                random_state=config.distillation_cv.random_state + model_offset + target_offset,
+                            fit_tasks.append(
+                                (
+                                    target_column,
+                                    public_target_rows[target_column].to_numpy(dtype=int),
+                                    model_offset,
+                                    target_offset,
+                                    model_spec,
+                                )
+                            )
+                    workers = bounded_worker_count(
+                        max_parallel_workers=resolved_run.max_parallel_workers,
+                        task_count=len(fit_tasks),
+                    )
+                    if workers == 1:
+                        fitted_pairs = [
+                            _fit_nested_single_target_classification_full(
+                                X_public=X_public,
+                                y_train_full=y_train_full,
+                                target_column=target_column,
+                                model_spec=model_spec,
+                                model_offset=model_offset,
+                                target_offset=target_offset,
                                 inner_n_splits=config.reproduction.inner_cv.n_splits,
                                 inner_shuffle=config.reproduction.inner_cv.shuffle,
+                                random_state_base=config.distillation_cv.random_state,
                             )
-                            model = build_reasoning_classifier(
-                                model_spec.kind,
-                                random_state=config.distillation_cv.random_state + model_offset + target_offset,
-                                param_overrides=best_params,
+                            for target_column, y_train_full, model_offset, target_offset, model_spec in fit_tasks
+                        ]
+                    else:
+                        with ThreadPoolExecutor(max_workers=workers) as executor:
+                            fitted_pairs = list(
+                                executor.map(
+                                    lambda task: _fit_nested_single_target_classification_full(
+                                        X_public=X_public,
+                                        y_train_full=task[1],
+                                        target_column=task[0],
+                                        model_spec=task[4],
+                                        model_offset=task[2],
+                                        target_offset=task[3],
+                                        inner_n_splits=config.reproduction.inner_cv.n_splits,
+                                        inner_shuffle=config.reproduction.inner_cv.shuffle,
+                                        random_state_base=config.distillation_cv.random_state,
+                                    ),
+                                    fit_tasks,
+                                )
                             )
-                            model.fit(X_public, y_train_full)
-                            fitted_models[(target_column, model_spec.model_id)] = model
+                    fitted_models = dict(fitted_pairs)
                 else:
                     fitted_models = fit_reasoning_classifiers_full(
                         feature_set.public_frame[feature_set.feature_columns],
@@ -763,6 +1020,8 @@ def run_reasoning_distillation_mode(
                         target_columns=target_columns,
                         model_specs=resolved_run.distillation_models,
                         random_state=config.distillation_cv.random_state,
+                        model_param_overrides_by_model_id=resolved_run.xgb_model_param_overrides_by_model_id,
+                        max_parallel_workers=resolved_run.max_parallel_workers,
                     )
                 heldout_predictions = predict_reasoning_classifiers_full(
                     heldout_feature_rows[feature_set.feature_columns],
@@ -843,6 +1102,7 @@ def run_reasoning_distillation_mode(
         f"- Intermediary banks prepared: {len(intermediary_banks)}",
         f"- Feature-set comparisons run: {len(feature_sets)}",
         f"- Distillation models run per target: {len(resolved_run.distillation_models)}",
+        f"- Max parallel workers: {resolved_run.max_parallel_workers}",
         "- Public CV strategy: stratified on quantile buckets of the row-wise mean selected target score.",
         f"- CV seed repeats: {resolved_run.cv_seed_repeat_count} (enabled={resolved_run.repeat_cv_with_new_seeds})",
         f"- Nested hyperparameter sweep: {resolved_run.distillation_nested_sweep}",
@@ -870,6 +1130,10 @@ def run_pipeline(
         from src.pipeline.model_testing import run_model_testing_mode
 
         return run_model_testing_mode(config, overrides_use, logger=logger)
+    if overrides_use.run_mode == "xgb_calibration_mode":
+        from src.pipeline.xgb_calibration import run_xgb_calibration_mode
+
+        return run_xgb_calibration_mode(config, overrides_use, logger=logger)
 
     if (
         (overrides_use.run_mode == "reasoning_distillation_mode")
@@ -898,6 +1162,7 @@ def run_pipeline(
         return run_reproduction_mode(
             config,
             use_nested_hyperparameter_cv=resolved.distillation_nested_sweep,
+            max_parallel_workers=resolved.max_parallel_workers,
             logger=logger,
         )
     return run_reasoning_distillation_mode(config, overrides, logger=logger)

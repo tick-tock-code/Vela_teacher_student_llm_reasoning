@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Callable
@@ -17,8 +18,10 @@ from src.evaluation.metrics import binary_classification_metrics, regression_met
 from src.intermediary_features.registry import assemble_feature_sets, prepare_intermediary_banks
 from src.pipeline.config import ExperimentConfig
 from src.pipeline.run_options import MODEL_FAMILY_TO_MODEL_ID, RunOverrides, resolve_run_options
+from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 from src.student.models import build_reasoning_classifier, build_reasoning_regressor
 from src.utils.artifact_io import timestamped_run_dir, write_csv, write_json, write_markdown
+from src.utils.parallel import bounded_worker_count
 from src.utils.paths import RUNS_DIR
 
 
@@ -485,6 +488,7 @@ def _run_stage(
     force_rebuild_intermediary_features: bool,
     nested_sweep: bool,
     output_mode: str,
+    model_param_overrides_by_model_id: dict[str, dict[str, float | int]] | None,
     logger: Logger | None,
 ) -> tuple[pd.DataFrame, list[dict[str, object]]]:
     if output_mode == "single_target":
@@ -510,6 +514,7 @@ def _run_stage(
                 run_mode="reasoning_distillation_mode",
                 target_family=family_id,
                 output_modes=[output_mode],
+                xgb_model_param_overrides_by_model_id=dict(model_param_overrides_by_model_id or {}),
                 heldout_evaluation=False,
                 repeat_cv_with_new_seeds=False,
                 cv_seed_repeat_count=1,
@@ -571,6 +576,7 @@ def _run_stage(
             run_mode="reasoning_distillation_mode",
             target_family=family_id,
             output_modes=[output_mode],
+            xgb_model_param_overrides_by_model_id=dict(model_param_overrides_by_model_id or {}),
             heldout_evaluation=False,
             repeat_cv_with_new_seeds=False,
             cv_seed_repeat_count=1,
@@ -633,9 +639,12 @@ def _run_stage(
                 shuffle=config_seeded.distillation_cv.shuffle,
                 random_state=seed,
             )
-            for model_offset, model_spec in enumerate(resolved_run.distillation_models):
+            model_tasks = list(enumerate(resolved_run.distillation_models))
+
+            def _run_model_task(task: tuple[int, object]) -> tuple[object, np.ndarray, dict[str, np.ndarray]]:
+                model_offset, model_spec = task
                 oof = np.full((len(X_public), len(target_columns)), np.nan, dtype=float)
-                fold_predictions: dict[str, np.ndarray] = {}
+                fold_predictions_local: dict[str, np.ndarray] = {}
                 for fold_offset, split in enumerate(splits):
                     X_train = X_public[split.train_idx]
                     X_test = X_public[split.test_idx]
@@ -653,6 +662,7 @@ def _run_stage(
                             if nested_sweep
                             else {}
                         )
+                        best_params = {**dict((model_param_overrides_by_model_id or {}).get(model_spec.model_id, {})), **best_params}
                         base = build_reasoning_regressor(
                             model_spec.kind,
                             random_state=seed + model_offset + fold_offset,
@@ -678,6 +688,7 @@ def _run_stage(
                             if nested_sweep
                             else {}
                         )
+                        best_params = {**dict((model_param_overrides_by_model_id or {}).get(model_spec.model_id, {})), **best_params}
                         base = build_reasoning_classifier(
                             model_spec.kind,
                             random_state=seed + model_offset + fold_offset,
@@ -687,13 +698,24 @@ def _run_stage(
                         model.fit(X_train, y_train)
                         preds = _predict_multi_output_probabilities(model, X_test, len(target_columns))
                     oof[split.test_idx] = preds
-                    fold_predictions[split.split_id] = preds
-
+                    fold_predictions_local[split.split_id] = preds
                 if np.isnan(oof).any():
                     raise RuntimeError(
                         f"Multi-output OOF contains NaNs for model '{model_spec.model_id}'."
                     )
+                return model_spec, oof, fold_predictions_local
 
+            workers = bounded_worker_count(
+                max_parallel_workers=resolved_run.max_parallel_workers,
+                task_count=len(model_tasks),
+            )
+            if workers == 1:
+                model_outputs = [_run_model_task(task) for task in model_tasks]
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    model_outputs = list(executor.map(_run_model_task, model_tasks))
+
+            for model_spec, oof, fold_predictions in model_outputs:
                 if target_family.task_kind == "regression":
                     for target_idx, target_column in enumerate(target_columns):
                         for split in splits:
@@ -800,6 +822,14 @@ def run_model_testing_mode(
     family_map = {spec.family_id: spec for spec in config.target_families}
     output_modes = resolved.output_modes
     stage_a_model_families = _resolve_stage_a_model_families(resolved.model_families)
+    model_param_overrides_by_model_id: dict[str, dict[str, float | int]] = {}
+    latest_calibration: dict[str, object] | None = None
+    if resolved.use_latest_xgb_calibration:
+        latest_calibration = load_latest_xgb_calibration(config.experiment_id)
+        if latest_calibration is None:
+            raise RuntimeError(
+                "use_latest_xgb_calibration was enabled, but no xgb calibration artifact was found."
+            )
 
     stage_a_rows: list[pd.DataFrame] = []
     stage_a_child_runs: list[dict[str, object]] = []
@@ -813,6 +843,14 @@ def run_model_testing_mode(
                 task_kind=task_kind,
                 model_families=stage_a_model_families,
             )
+            stage_model_overrides = dict(model_param_overrides_by_model_id)
+            if latest_calibration is not None:
+                selected_map = dict(latest_calibration.get("selected_n_estimators_by_family", {}))
+                selected_n = selected_map.get(family_id)
+                if selected_n is not None:
+                    xgb_model_id = "xgb1_regressor" if task_kind == "regression" else "xgb1_classifier"
+                    if xgb_model_id in stage_a_model_ids:
+                        stage_model_overrides[xgb_model_id] = {"n_estimators": int(selected_n)}
             _log(
                 logger,
                 f"Stage A screening for '{family_id}' ({output_mode}) with feature sets: {feature_set_ids}.",
@@ -827,6 +865,7 @@ def run_model_testing_mode(
                 force_rebuild_intermediary_features=resolved.force_rebuild_intermediary_features,
                 nested_sweep=resolved.distillation_nested_sweep,
                 output_mode=output_mode,
+                model_param_overrides_by_model_id=stage_model_overrides,
                 logger=logger,
             )
             stage_a_rows.append(stage_metrics)
@@ -893,6 +932,14 @@ def run_model_testing_mode(
                     task_kind=task_kind,
                     model_families=resolved.model_families,
                 )
+                stage_model_overrides = dict(model_param_overrides_by_model_id)
+                if latest_calibration is not None:
+                    selected_map = dict(latest_calibration.get("selected_n_estimators_by_family", {}))
+                    selected_n = selected_map.get(family_id)
+                    if selected_n is not None:
+                        xgb_model_id = "xgb1_regressor" if task_kind == "regression" else "xgb1_classifier"
+                        if xgb_model_id in model_ids:
+                            stage_model_overrides[xgb_model_id] = {"n_estimators": int(selected_n)}
                 _log(
                     logger,
                     f"Stage B model testing for '{family_id}' ({output_mode}) on shortlisted sets: {shortlisted}.",
@@ -907,6 +954,7 @@ def run_model_testing_mode(
                     force_rebuild_intermediary_features=False,
                     nested_sweep=resolved.distillation_nested_sweep,
                     output_mode=output_mode,
+                    model_param_overrides_by_model_id=stage_model_overrides,
                     logger=logger,
                 )
                 stage_metrics["stage"] = "advanced"
@@ -944,9 +992,11 @@ def run_model_testing_mode(
         "",
         f"- Candidate feature sets: {len(feature_set_ids)}",
         f"- Repeats: {repeat_count}",
+        f"- Max parallel workers: {resolved.max_parallel_workers}",
         f"- Stage A model families: {', '.join(stage_a_model_families)}",
         f"- Output modes: {', '.join(output_modes)}",
         f"- Stage B enabled: {resolved.run_advanced_models}",
+        f"- Use latest xgb calibration: {resolved.use_latest_xgb_calibration}",
         "- Held-out/test features or targets are not used in this mode.",
     ]
     write_markdown(run_dir / "run_summary.md", "\n".join(summary_lines))

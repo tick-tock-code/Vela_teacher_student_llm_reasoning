@@ -9,6 +9,7 @@ from tkinter import scrolledtext, ttk
 from src.data.targets import load_target_family
 from src.pipeline.config import ExperimentConfig, load_experiment_config
 from src.pipeline.distillation import run_pipeline
+from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides
 
 
@@ -37,6 +38,8 @@ class LauncherSelections:
     model_families: list[str] | None = None
     output_modes: list[str] | None = None
     run_advanced_models: bool | None = None
+    xgb_calibration_estimators: list[int] | None = None
+    use_latest_xgb_calibration: bool | None = None
 
 
 def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
@@ -57,6 +60,8 @@ def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
         model_families=selections.model_families,
         output_modes=selections.output_modes,
         run_advanced_models=selections.run_advanced_models,
+        xgb_calibration_estimators=selections.xgb_calibration_estimators,
+        use_latest_xgb_calibration=selections.use_latest_xgb_calibration,
     )
 
 
@@ -98,6 +103,9 @@ class RunLauncher(ttk.Frame):
         self.mt_force_rebuild_var = tk.BooleanVar(value=False)
         self.mt_run_advanced_var = tk.BooleanVar(value=False)
         self.mt_embedding_model_var = tk.StringVar(value="sentence-transformers/all-MiniLM-L6-v2")
+        self.mt_use_latest_xgb_calibration_var = tk.BooleanVar(value=False)
+        self.mt_calibration_sweep_var = tk.StringVar(value="")
+        self.mt_latest_calibration_var = tk.StringVar(value="No calibration loaded")
 
         self.feature_bank_vars: dict[str, tk.BooleanVar] = {}
         self.setup_model_vars: dict[str, tk.BooleanVar] = {
@@ -192,6 +200,7 @@ class RunLauncher(ttk.Frame):
         ttk.Button(actions, text="Reset Defaults", command=self._reset_defaults).grid(row=0, column=0, sticky="w")
         ttk.Button(actions, text="Run Setup Pipeline", command=self.start_run_setup).grid(row=0, column=1, padx=(8, 0), sticky="w")
         ttk.Button(actions, text="Run Model Testing", command=self.start_model_testing).grid(row=0, column=2, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run XGB Calibration", command=self.start_xgb_calibration).grid(row=0, column=3, padx=(8, 0), sticky="w")
         ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=4, sticky="w")
 
         out = ttk.LabelFrame(self, text="Output")
@@ -340,16 +349,27 @@ class RunLauncher(ttk.Frame):
         ttk.Checkbutton(settings, text="Run advanced models stage", variable=self.mt_run_advanced_var).grid(
             row=1, column=0, sticky="w"
         )
+        ttk.Checkbutton(
+            settings,
+            text="Use latest XGB calibration defaults",
+            variable=self.mt_use_latest_xgb_calibration_var,
+        ).grid(row=1, column=1, sticky="w")
         ttk.Checkbutton(settings, text="Force rebuild intermediary banks", variable=self.mt_force_rebuild_var).grid(
-            row=1, column=1, sticky="w"
+            row=1, column=2, sticky="w"
         )
         ttk.Label(settings, text="Embedding model").grid(row=2, column=0, sticky="w", pady=(4, 0))
         ttk.Entry(settings, textvariable=self.mt_embedding_model_var).grid(row=2, column=1, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Label(settings, text="Calibration sweep").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(settings, textvariable=self.mt_calibration_sweep_var, justify="left").grid(row=3, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(settings, text="Latest calibration").grid(row=4, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(settings, textvariable=self.mt_latest_calibration_var, justify="left", wraplength=900).grid(
+            row=4, column=1, columnspan=2, sticky="w", pady=(4, 0)
+        )
         ttk.Label(
             settings,
             text="Screening is training-only: held-out/test features and labels are not used.",
             justify="left",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def _load_config_preview(self) -> None:
         config = load_experiment_config(self.config_path_var.get().strip())
@@ -369,8 +389,20 @@ class RunLauncher(ttk.Frame):
         self.mt_repeat_cv_var.set(False)
         self.mt_repeat_count_var.set("1")
         self.mt_run_advanced_var.set(bool(config.model_testing.run_advanced_models_default))
+        self.mt_use_latest_xgb_calibration_var.set(bool(config.model_testing.use_latest_xgb_calibration_default))
+        self.mt_calibration_sweep_var.set(
+            ", ".join(str(value) for value in config.model_testing.xgb_calibration_estimators)
+        )
         self.mt_output_mode_vars["single_target"].set(True)
         self.mt_output_mode_vars["multi_output"].set(False)
+        latest = load_latest_xgb_calibration(config.experiment_id)
+        if latest is None:
+            self.mt_latest_calibration_var.set("No calibration found")
+        else:
+            selected = latest.get("selected_n_estimators_by_family", {})
+            self.mt_latest_calibration_var.set(
+                f"from {latest.get('run_dir', 'unknown')}: {selected}"
+            )
 
         for spec in config.intermediary_features:
             if spec.kind.startswith("sentence_transformer") and spec.embedding_model_name:
@@ -562,12 +594,39 @@ class RunLauncher(ttk.Frame):
             embedding_model_name=self.mt_embedding_model_var.get().strip() or None,
             repeat_cv_with_new_seeds=bool(self.mt_repeat_cv_var.get()),
             cv_seed_repeat_count=self._parse_optional_int(self.mt_repeat_count_var.get()),
-            distillation_nested_sweep=True,
+            distillation_nested_sweep=False,
             save_reasoning_predictions=False,
             candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
             model_families=[key for key, var in self.mt_model_family_vars.items() if var.get()],
             output_modes=[key for key, var in self.mt_output_mode_vars.items() if var.get()],
             run_advanced_models=bool(self.mt_run_advanced_var.get()),
+            use_latest_xgb_calibration=bool(self.mt_use_latest_xgb_calibration_var.get()),
+            **common,
+        )
+
+    def _calibration_selections(self) -> LauncherSelections:
+        common = self._build_common_kwargs()
+        sweep = []
+        if self._loaded_config is not None:
+            sweep = list(self._loaded_config.model_testing.xgb_calibration_estimators)
+        return LauncherSelections(
+            run_mode="xgb_calibration_mode",
+            target_family=self.mt_target_family_var.get().strip(),
+            heldout_evaluation=False,
+            active_feature_banks=None,
+            force_rebuild_intermediary_features=bool(self.mt_force_rebuild_var.get()),
+            reasoning_models=None,
+            embedding_model_name=self.mt_embedding_model_var.get().strip() or None,
+            repeat_cv_with_new_seeds=False,
+            cv_seed_repeat_count=1,
+            distillation_nested_sweep=False,
+            save_reasoning_predictions=False,
+            candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
+            model_families=["xgb1"],
+            output_modes=["single_target"],
+            run_advanced_models=False,
+            xgb_calibration_estimators=sweep,
+            use_latest_xgb_calibration=False,
             **common,
         )
 
@@ -606,6 +665,19 @@ class RunLauncher(ttk.Frame):
             self._append_log(f"ERROR: {exc}")
             return
         self._start_worker(selections, "Starting model-testing pipeline.")
+
+    def start_xgb_calibration(self) -> None:
+        try:
+            selections = self._calibration_selections()
+            if not selections.candidate_feature_sets:
+                raise ValueError("Select at least one candidate feature set.")
+            if not selections.xgb_calibration_estimators:
+                raise ValueError("Calibration estimator sweep cannot be empty.")
+        except ValueError as exc:
+            self.status_var.set("Invalid input")
+            self._append_log(f"ERROR: {exc}")
+            return
+        self._start_worker(selections, "Starting XGB calibration pipeline.")
 
     def _start_worker(self, selections: LauncherSelections, start_message: str) -> None:
         if self.worker is not None and self.worker.is_alive():

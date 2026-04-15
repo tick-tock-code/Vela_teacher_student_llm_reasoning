@@ -10,6 +10,7 @@ SUPPORTED_RUN_MODES = {
     "reproduction_mode",
     "reasoning_distillation_mode",
     "model_testing_mode",
+    "xgb_calibration_mode",
 }
 
 SUPPORTED_INTERMEDIARY_FEATURE_KINDS = {
@@ -175,6 +176,8 @@ class ModelTestingSpec:
     screening_repeat_cv_count: int
     screening_score_delta: float
     max_recommended_feature_sets: int
+    xgb_calibration_estimators: list[int]
+    use_latest_xgb_calibration_default: bool
 
 
 @dataclass(frozen=True)
@@ -418,6 +421,10 @@ def _validate_model_testing(
         raise RuntimeError("model_testing.max_recommended_feature_sets must be >= 1.")
     if spec.screening_score_delta < 0.0:
         raise RuntimeError("model_testing.screening_score_delta must be >= 0.")
+    if not spec.xgb_calibration_estimators:
+        raise RuntimeError("model_testing.xgb_calibration_estimators must include at least one value.")
+    if any(value <= 0 for value in spec.xgb_calibration_estimators):
+        raise RuntimeError("model_testing.xgb_calibration_estimators values must all be > 0.")
 
 
 def _resolve_cv_spec(payload: dict[str, object], *, default_n_splits: int) -> CVSpec:
@@ -621,6 +628,16 @@ def load_experiment_config(path: str) -> ExperimentConfig:
         screening_score_delta=float(model_testing_payload.get("screening_score_delta", 0.005)),
         max_recommended_feature_sets=int(
             model_testing_payload.get("max_recommended_feature_sets", 3)
+        ),
+        xgb_calibration_estimators=[
+            int(value)
+            for value in model_testing_payload.get(
+                "xgb_calibration_estimators",
+                [40, 80, 120, 180, 240, 320],
+            )
+        ],
+        use_latest_xgb_calibration_default=bool(
+            model_testing_payload.get("use_latest_xgb_calibration_default", False)
         ),
     )
     _validate_model_testing(

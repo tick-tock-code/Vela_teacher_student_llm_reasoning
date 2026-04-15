@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
@@ -16,6 +17,7 @@ from src.evaluation.metrics import binary_classification_metrics
 from src.pipeline.config import ExperimentConfig, ReproductionExperimentSpec
 from src.student.models import build_reproduction_classifier
 from src.utils.artifact_io import timestamped_run_dir, write_csv, write_json, write_markdown
+from src.utils.parallel import bounded_worker_count, resolve_max_parallel_workers
 from src.utils.paths import RUNS_DIR
 
 
@@ -278,6 +280,7 @@ def run_reproduction_mode(
     config: ExperimentConfig,
     *,
     use_nested_hyperparameter_cv: bool = True,
+    max_parallel_workers: int | None = None,
     logger: Logger | None = None,
 ) -> Path:
     run_dir = timestamped_run_dir(RUNS_DIR / config.experiment_id, "success_reproduction")
@@ -296,6 +299,7 @@ def run_reproduction_mode(
 
     labels_train = repository_splits.train_labels.set_index("founder_uuid").reindex(repository_splits.train_ids)
     y_test: np.ndarray | None = None
+    resolved_parallel_workers = resolve_max_parallel_workers(max_parallel_workers)
 
     ranked_lambda_columns: dict[str, list[str]] = {}
     lambda_bank = banks_by_id["lambda_policies"]
@@ -360,11 +364,14 @@ def run_reproduction_mode(
         continuous_indices = _continuous_indices(feature_columns, binary_feature_columns)
         oof = np.full(len(train_frame), np.nan, dtype=float)
         selected_cs: list[float] = []
+        fold_tasks = list(enumerate(outer_splits))
 
-        for fold_offset, split in enumerate(outer_splits):
+        def _run_outer_fold(task: tuple[int, object]) -> tuple[np.ndarray, np.ndarray, float | None]:
+            fold_offset, split = task
             X_outer_train = X_train[split.train_idx]
             X_outer_eval = X_train[split.test_idx]
             y_outer_train = y_train[split.train_idx]
+            chosen_c_local: float | None = None
             if experiment.model_kind == "nested_l2_logreg" and use_nested_hyperparameter_cv:
                 inner_splits = build_public_cv_splits(
                     y_outer_train,
@@ -372,7 +379,7 @@ def run_reproduction_mode(
                     shuffle=config.reproduction.inner_cv.shuffle,
                     random_state=config.reproduction.inner_cv.random_state,
                 )
-                preds, chosen_c = _nested_l2_predict_proba(
+                preds_local, chosen_c_local = _nested_l2_predict_proba(
                     X_outer_train,
                     y_outer_train,
                     X_outer_eval,
@@ -381,18 +388,16 @@ def run_reproduction_mode(
                     c_grid=config.reproduction.logistic_c_grid,
                     random_state=config.reproduction.outer_cv.random_state + fold_offset,
                 )
-                selected_cs.append(chosen_c)
             elif experiment.model_kind == "nested_l2_logreg":
-                fixed_c = _default_l2_c(config.reproduction.logistic_c_grid)
-                preds = _fixed_l2_predict_proba(
+                chosen_c_local = _default_l2_c(config.reproduction.logistic_c_grid)
+                preds_local = _fixed_l2_predict_proba(
                     X_outer_train,
                     y_outer_train,
                     X_outer_eval,
                     continuous_indices=continuous_indices if experiment.standardize else [],
-                    c_value=fixed_c,
+                    c_value=chosen_c_local,
                     random_state=config.reproduction.outer_cv.random_state + fold_offset,
                 )
-                selected_cs.append(fixed_c)
             else:
                 if experiment.standardize:
                     X_outer_train_use, X_outer_eval_use = _standardize_arrays(
@@ -407,11 +412,25 @@ def run_reproduction_mode(
                     random_state=config.reproduction.outer_cv.random_state + fold_offset,
                 )
                 model.fit(X_outer_train_use, y_outer_train)
-                preds = model.predict_proba(X_outer_eval_use)[:, 1]
-
+                preds_local = model.predict_proba(X_outer_eval_use)[:, 1]
             if experiment.use_exit_override:
-                preds = _apply_exit_override(preds, exit_train[split.test_idx])
-            oof[split.test_idx] = preds
+                preds_local = _apply_exit_override(preds_local, exit_train[split.test_idx])
+            return split.test_idx, preds_local, chosen_c_local
+
+        fold_workers = bounded_worker_count(
+            max_parallel_workers=resolved_parallel_workers,
+            task_count=len(fold_tasks),
+        )
+        if fold_workers == 1:
+            fold_outputs = [_run_outer_fold(task) for task in fold_tasks]
+        else:
+            with ThreadPoolExecutor(max_workers=fold_workers) as executor:
+                fold_outputs = list(executor.map(_run_outer_fold, fold_tasks))
+
+        for test_idx, preds, chosen_c in fold_outputs:
+            oof[test_idx] = preds
+            if chosen_c is not None:
+                selected_cs.append(chosen_c)
 
         threshold, cv_f05 = _select_threshold_from_grid(
             y_train,
@@ -519,6 +538,7 @@ def run_reproduction_mode(
         f"- Best held-out F0.5: {best_row['test_f0_5']:.4f}",
         f"- Default run mode: `{config.defaults.run_mode}`",
         f"- Nested hyperparameter CV enabled: {use_nested_hyperparameter_cv}",
+        f"- Max parallel workers: {resolved_parallel_workers}",
         "- This mode reproduces the success-prediction headline matrix from Feature Repository.",
     ]
     write_markdown(run_dir / "run_summary.md", "\n".join(summary_lines))

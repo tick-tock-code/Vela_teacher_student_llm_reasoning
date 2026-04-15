@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--run-mode",
-        choices=["reproduction_mode", "reasoning_distillation_mode", "model_testing_mode"],
+        choices=["reproduction_mode", "reasoning_distillation_mode", "model_testing_mode", "xgb_calibration_mode"],
         help="Pipeline mode. Defaults to the config default.",
     )
     parser.add_argument(
@@ -94,6 +94,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="In model_testing_mode, run stage-B advanced model comparisons on shortlisted feature sets.",
     )
     parser.add_argument(
+        "--xgb-calibration-estimators",
+        nargs="*",
+        type=int,
+        help="Coarse n_estimators sweep values for xgb_calibration_mode.",
+    )
+    parser.add_argument(
+        "--use-latest-xgb-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="In model_testing_mode, load latest xgb calibration and override xgb n_estimators.",
+    )
+    parser.add_argument(
+        "--max-parallel-workers",
+        type=int,
+        help="Maximum worker threads for parallel model training (default auto: min(7, cpu_count-1)).",
+    )
+    parser.add_argument(
         "--distillation-nested-sweep",
         dest="nested_hyperparameter_cv",
         action="store_const",
@@ -142,6 +159,13 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
             else None
         ),
         run_advanced_models=args.run_advanced_models,
+        xgb_calibration_estimators=(
+            [int(item) for item in args.xgb_calibration_estimators]
+            if args.xgb_calibration_estimators
+            else None
+        ),
+        use_latest_xgb_calibration=args.use_latest_xgb_calibration,
+        max_parallel_workers=args.max_parallel_workers,
     )
 
 
