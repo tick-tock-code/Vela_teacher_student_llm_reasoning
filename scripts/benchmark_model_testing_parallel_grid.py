@@ -107,6 +107,23 @@ def _build_grid_cases(args: argparse.Namespace) -> list[BenchmarkCase]:
     return _dedupe_cases(cases)
 
 
+def _build_worker_sweep_cases(args: argparse.Namespace) -> list[BenchmarkCase]:
+    workers = _parse_int_list(args.worker_sweep_workers)
+    if args.max_worker_sweep_workers is not None:
+        workers = [value for value in workers if value <= args.max_worker_sweep_workers]
+    if not workers:
+        raise RuntimeError("No worker-sweep cases remain after applying max-worker-sweep-workers.")
+    return [
+        BenchmarkCase(
+            mode_name=f"worker_sweep_w{worker}_t1",
+            max_parallel_workers=worker,
+            model_testing_per_fit_threads=1,
+            description="Worker-only sweep case (per-fit BLAS/OpenMP threads fixed to 1).",
+        )
+        for worker in workers
+    ]
+
+
 def _read_estimated_fits(run_dir: Path) -> int:
     summary_path = run_dir / "run_summary.md"
     if not summary_path.exists():
@@ -144,11 +161,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark-profile",
-        choices=["quick", "grid"],
+        choices=["quick", "grid", "worker_sweep"],
         default="quick",
         help=(
             "Use 'quick' for three short comparison modes or 'grid' for the full "
-            "workers/thread Cartesian product."
+            "workers/thread Cartesian product. Use 'worker_sweep' to vary workers "
+            "while fixing per-fit threads at 1."
         ),
     )
     parser.add_argument(
@@ -188,6 +206,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--worker-sweep-workers",
+        default="2,4,6,8,12",
+        help=(
+            "Comma-separated worker values for --benchmark-profile worker_sweep. "
+            "Per-fit threads are fixed to 1 in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--max-worker-sweep-workers",
+        type=int,
+        default=None,
+        help=(
+            "Optional upper bound for worker-sweep values to keep runs stable on a "
+            "given machine."
+        ),
+    )
+    parser.add_argument(
         "--workers-grid",
         default="4,6,8",
         help="Comma-separated max_parallel_workers values (e.g. 4,6,8).",
@@ -223,6 +258,8 @@ def main() -> None:
         raise RuntimeError("cv-splits must be >= 2.")
     if args.single_fit_threads is not None and args.single_fit_threads < 1:
         raise RuntimeError("single-fit-threads must be >= 1.")
+    if args.max_worker_sweep_workers is not None and args.max_worker_sweep_workers < 1:
+        raise RuntimeError("max-worker-sweep-workers must be >= 1.")
 
     config = load_experiment_config(args.config)
     benchmark_config = replace(
@@ -241,6 +278,8 @@ def main() -> None:
 
     if args.benchmark_profile == "quick":
         benchmark_cases = _build_quick_cases(args)
+    elif args.benchmark_profile == "worker_sweep":
+        benchmark_cases = _build_worker_sweep_cases(args)
     else:
         benchmark_cases = _build_grid_cases(args)
 
