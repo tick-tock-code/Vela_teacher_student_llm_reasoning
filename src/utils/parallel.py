@@ -3,7 +3,32 @@ from __future__ import annotations
 import os
 
 
-DEFAULT_MAX_PARALLEL_WORKERS = 7
+# Use all logical cores minus one by default unless explicitly overridden.
+DEFAULT_MAX_PARALLEL_WORKERS = None
+THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+)
+
+
+def preferred_thread_count(requested: int | None = None) -> int:
+    if requested is not None:
+        if requested < 1:
+            raise RuntimeError("thread_count must be >= 1.")
+        return int(requested)
+    cpu_count = os.cpu_count() or 1
+    # Reserve one logical core for OS responsiveness.
+    return max(1, cpu_count - 1)
+
+
+def apply_global_thread_env(thread_count: int | None = None) -> int:
+    resolved = preferred_thread_count(thread_count)
+    for env_var in THREAD_ENV_VARS:
+        os.environ[env_var] = str(resolved)
+    return resolved
 
 
 def resolve_max_parallel_workers(requested: int | None = None) -> int:
@@ -11,8 +36,9 @@ def resolve_max_parallel_workers(requested: int | None = None) -> int:
         if requested < 1:
             raise RuntimeError("max_parallel_workers must be >= 1.")
         return int(requested)
-    cpu_count = os.cpu_count() or 1
-    return max(1, min(DEFAULT_MAX_PARALLEL_WORKERS, cpu_count - 1))
+    if DEFAULT_MAX_PARALLEL_WORKERS is not None:
+        return int(DEFAULT_MAX_PARALLEL_WORKERS)
+    return preferred_thread_count()
 
 
 def bounded_worker_count(*, max_parallel_workers: int, task_count: int) -> int:

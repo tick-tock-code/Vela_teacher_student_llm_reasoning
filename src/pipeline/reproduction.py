@@ -180,6 +180,8 @@ def _fixed_l2_predict_proba(
 
 
 def _default_l2_c(c_grid: list[float]) -> float:
+    if 5.0 in c_grid:
+        return 5.0
     if 1.0 in c_grid:
         return 1.0
     if not c_grid:

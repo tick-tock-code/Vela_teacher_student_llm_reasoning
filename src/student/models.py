@@ -7,6 +7,10 @@ from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 
 from src.utils.dependencies import require_dependency
+from src.utils.parallel import preferred_thread_count
+
+
+DEFAULT_MODEL_THREADS = preferred_thread_count()
 
 
 XGB_CLASSIFIER_PARAMS = {
@@ -22,7 +26,7 @@ XGB_CLASSIFIER_PARAMS = {
     "reg_lambda": 15.0,
     "objective": "binary:logistic",
     "eval_metric": "logloss",
-    "n_jobs": 1,
+    "n_jobs": DEFAULT_MODEL_THREADS,
 }
 
 XGB_REGRESSOR_PARAMS = {
@@ -36,7 +40,7 @@ XGB_REGRESSOR_PARAMS = {
     "reg_lambda": 15.0,
     "objective": "reg:squarederror",
     "eval_metric": "rmse",
-    "n_jobs": 1,
+    "n_jobs": DEFAULT_MODEL_THREADS,
 }
 
 JOEL_XGB_CLASSIFIER_PARAMS = {
@@ -52,7 +56,7 @@ JOEL_XGB_CLASSIFIER_PARAMS = {
     "reg_lambda": 15.0,
     "objective": "binary:logistic",
     "eval_metric": "logloss",
-    "n_jobs": 1,
+    "n_jobs": DEFAULT_MODEL_THREADS,
 }
 
 AUTORESEARCH_XGB_CLASSIFIER_PARAMS = {
@@ -68,7 +72,7 @@ AUTORESEARCH_XGB_CLASSIFIER_PARAMS = {
     "reg_lambda": 15.0,
     "objective": "binary:logistic",
     "eval_metric": "logloss",
-    "n_jobs": 1,
+    "n_jobs": DEFAULT_MODEL_THREADS,
 }
 
 
@@ -89,10 +93,12 @@ def build_reasoning_regressor(
         return xgb.XGBRegressor(random_state=random_state, **params)
     if model_kind == "mlp_regressor":
         return MLPRegressor(
-            hidden_layer_sizes=tuple(overrides.get("hidden_layer_sizes", (128, 64))),
-            alpha=float(overrides.get("alpha", 1e-4)),
+            hidden_layer_sizes=tuple(overrides.get("hidden_layer_sizes", (32,))),
+            alpha=float(overrides.get("alpha", 0.1)),
             learning_rate_init=float(overrides.get("learning_rate_init", 1e-3)),
-            max_iter=int(overrides.get("max_iter", 600)),
+            max_iter=int(overrides.get("max_iter", 1000)),
+            tol=float(overrides.get("tol", 1e-5)),
+            n_iter_no_change=int(overrides.get("n_iter_no_change", 20)),
             early_stopping=bool(overrides.get("early_stopping", True)),
             random_state=random_state,
         )
@@ -112,7 +118,9 @@ def build_reasoning_regressor(
                 else None
             ),
             min_samples_leaf=int(overrides.get("min_samples_leaf", 1)),
-            n_jobs=1,
+            max_features=overrides.get("max_features", "sqrt"),
+            bootstrap=bool(overrides.get("bootstrap", True)),
+            n_jobs=int(overrides.get("n_jobs", DEFAULT_MODEL_THREADS)),
             random_state=random_state,
         )
     raise ValueError(f"Unsupported reasoning model kind: {model_kind}")
@@ -144,7 +152,7 @@ def build_reasoning_classifier(
     if model_kind == "logreg_classifier":
         return LogisticRegression(
             solver="lbfgs",
-            C=float(overrides.get("C", 1.0)),
+            C=float(overrides.get("C", 5.0)),
             max_iter=3000,
             random_state=random_state,
         )
@@ -156,10 +164,12 @@ def build_reasoning_classifier(
         return xgb.XGBClassifier(random_state=random_state, **params)
     if model_kind == "mlp_classifier":
         return MLPClassifier(
-            hidden_layer_sizes=tuple(overrides.get("hidden_layer_sizes", (128, 64))),
-            alpha=float(overrides.get("alpha", 1e-4)),
+            hidden_layer_sizes=tuple(overrides.get("hidden_layer_sizes", (32,))),
+            alpha=float(overrides.get("alpha", 0.1)),
             learning_rate_init=float(overrides.get("learning_rate_init", 1e-3)),
-            max_iter=int(overrides.get("max_iter", 600)),
+            max_iter=int(overrides.get("max_iter", 1000)),
+            tol=float(overrides.get("tol", 1e-5)),
+            n_iter_no_change=int(overrides.get("n_iter_no_change", 20)),
             early_stopping=bool(overrides.get("early_stopping", True)),
             random_state=random_state,
         )
@@ -181,7 +191,9 @@ def build_reasoning_classifier(
                 else None
             ),
             min_samples_leaf=int(overrides.get("min_samples_leaf", 1)),
-            n_jobs=1,
+            max_features=overrides.get("max_features", "sqrt"),
+            bootstrap=bool(overrides.get("bootstrap", True)),
+            n_jobs=int(overrides.get("n_jobs", DEFAULT_MODEL_THREADS)),
             random_state=random_state,
         )
     raise ValueError(f"Unsupported reasoning classifier kind: {model_kind}")

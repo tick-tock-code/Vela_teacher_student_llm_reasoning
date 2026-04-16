@@ -9,6 +9,7 @@ import uuid
 from unittest import mock
 
 import pandas as pd
+from pandas.testing import assert_frame_equal
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -291,6 +292,8 @@ class PipelineSmokeTests(unittest.TestCase):
             "distillation_models": [
                 {"model_id": "ridge", "kind": "ridge", "supported_task_kinds": ["regression"]},
                 {"model_id": "logreg_classifier", "kind": "logreg_classifier", "supported_task_kinds": ["classification"]},
+                {"model_id": "mlp_regressor", "kind": "mlp_regressor", "supported_task_kinds": ["regression"]},
+                {"model_id": "mlp_classifier", "kind": "mlp_classifier", "supported_task_kinds": ["classification"]},
             ],
             "reproduction": {
                 "outer_cv": {"n_splits": 3, "shuffle": True, "random_state": 42},
@@ -417,5 +420,104 @@ class PipelineSmokeTests(unittest.TestCase):
             heldout_metrics = pd.read_csv(run_dir / "reasoning_heldout_metrics.csv")
             self.assertIn("f0_5", heldout_metrics.columns)
             self.assertTrue((heldout_metrics["model_id"] == "logreg_classifier").all())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_model_testing_multi_output_parallel_consistency(self) -> None:
+        root = _workspace_temp_dir()
+        try:
+            config_path = self._write_config(root)
+            config = load_experiment_config(str(config_path))
+
+            runs_root = root / "runs"
+            intermediary_root = root / "intermediary"
+            with mock.patch("src.pipeline.distillation.RUNS_DIR", runs_root), mock.patch(
+                "src.intermediary_features.storage.INTERMEDIARY_FEATURES_DIR",
+                intermediary_root,
+            ):
+                run_serial = run_pipeline(
+                    config,
+                    RunOverrides(
+                        config_path=str(config_path),
+                        run_mode="model_testing_mode",
+                        target_family="v25_policies",
+                        candidate_feature_sets=["hq_baseline", "llm_engineering"],
+                        model_families=["linear_l2"],
+                        output_modes=["multi_output"],
+                        max_parallel_workers=1,
+                    ),
+                )
+                run_parallel = run_pipeline(
+                    config,
+                    RunOverrides(
+                        config_path=str(config_path),
+                        run_mode="model_testing_mode",
+                        target_family="v25_policies",
+                        candidate_feature_sets=["hq_baseline", "llm_engineering"],
+                        model_families=["linear_l2"],
+                        output_modes=["multi_output"],
+                        max_parallel_workers=2,
+                    ),
+                )
+
+            serial = pd.read_csv(run_serial / "feature_set_screening.csv").sort_values(
+                ["target_family", "output_mode", "feature_set_id", "rank"]
+            ).reset_index(drop=True)
+            parallel = pd.read_csv(run_parallel / "feature_set_screening.csv").sort_values(
+                ["target_family", "output_mode", "feature_set_id", "rank"]
+            ).reset_index(drop=True)
+            assert_frame_equal(serial, parallel, atol=1e-10, rtol=1e-10)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_mlp_calibration_parallel_consistency(self) -> None:
+        root = _workspace_temp_dir()
+        try:
+            config_path = self._write_config(root)
+            config = load_experiment_config(str(config_path))
+
+            runs_root = root / "runs"
+            intermediary_root = root / "intermediary"
+            with mock.patch("src.pipeline.distillation.RUNS_DIR", runs_root), mock.patch(
+                "src.pipeline.mlp_calibration.RUNS_DIR",
+                runs_root,
+            ), mock.patch(
+                "src.intermediary_features.storage.INTERMEDIARY_FEATURES_DIR",
+                intermediary_root,
+            ):
+                run_serial = run_pipeline(
+                    config,
+                    RunOverrides(
+                        config_path=str(config_path),
+                        run_mode="mlp_calibration_mode",
+                        target_family="v25_policies",
+                        candidate_feature_sets=["hq_baseline", "llm_engineering"],
+                        mlp_calibration_hidden_layer_sizes=[[8]],
+                        mlp_calibration_alpha=[0.1],
+                        max_parallel_workers=1,
+                    ),
+                )
+                run_parallel = run_pipeline(
+                    config,
+                    RunOverrides(
+                        config_path=str(config_path),
+                        run_mode="mlp_calibration_mode",
+                        target_family="v25_policies",
+                        candidate_feature_sets=["hq_baseline", "llm_engineering"],
+                        mlp_calibration_hidden_layer_sizes=[[8]],
+                        mlp_calibration_alpha=[0.1],
+                        max_parallel_workers=2,
+                    ),
+                )
+
+            serial_payload = json.loads((run_serial / "mlp_calibration_recommendations.json").read_text(encoding="utf-8"))
+            parallel_payload = json.loads((run_parallel / "mlp_calibration_recommendations.json").read_text(encoding="utf-8"))
+            serial_metrics = pd.DataFrame(serial_payload["metrics_table"]).sort_values(
+                ["target_family", "feature_set_id", "params_signature"]
+            ).reset_index(drop=True)
+            parallel_metrics = pd.DataFrame(parallel_payload["metrics_table"]).sort_values(
+                ["target_family", "feature_set_id", "params_signature"]
+            ).reset_index(drop=True)
+            assert_frame_equal(serial_metrics, parallel_metrics, atol=1e-10, rtol=1e-10)
         finally:
             shutil.rmtree(root, ignore_errors=True)

@@ -28,7 +28,7 @@ def train_reasoning_classifiers_oof(
     model_specs: list[DistillationModelSpec],
     splits: list,
     random_state: int,
-    model_param_overrides_by_model_id: dict[str, dict[str, float | int]] | None = None,
+    model_param_overrides_by_model_id: dict[str, dict[str, object]] | None = None,
     max_parallel_workers: int = 1,
 ) -> ReasoningClassificationCVOutputs:
     predictions = pd.DataFrame({"founder_uuid": founder_ids.astype(str).tolist()})
@@ -118,7 +118,7 @@ def fit_reasoning_classifiers_full(
     target_columns: list[str],
     model_specs: list[DistillationModelSpec],
     random_state: int,
-    model_param_overrides_by_model_id: dict[str, dict[str, float | int]] | None = None,
+    model_param_overrides_by_model_id: dict[str, dict[str, object]] | None = None,
     max_parallel_workers: int = 1,
 ) -> dict[tuple[str, str], object]:
     X = feature_frame.to_numpy(dtype=float)

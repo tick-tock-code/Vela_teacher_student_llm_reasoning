@@ -11,6 +11,8 @@ SUPPORTED_RUN_MODES = {
     "reasoning_distillation_mode",
     "model_testing_mode",
     "xgb_calibration_mode",
+    "rf_calibration_mode",
+    "mlp_calibration_mode",
 }
 
 SUPPORTED_INTERMEDIARY_FEATURE_KINDS = {
@@ -178,6 +180,13 @@ class ModelTestingSpec:
     max_recommended_feature_sets: int
     xgb_calibration_estimators: list[int]
     use_latest_xgb_calibration_default: bool
+    rf_calibration_min_samples_leaf: list[int]
+    rf_calibration_max_depth: list[int | None]
+    rf_calibration_max_features: list[str | float]
+    use_latest_rf_calibration_default: bool
+    mlp_calibration_hidden_layer_sizes: list[list[int]]
+    mlp_calibration_alpha: list[float]
+    use_latest_mlp_calibration_default: bool
 
 
 @dataclass(frozen=True)
@@ -425,6 +434,44 @@ def _validate_model_testing(
         raise RuntimeError("model_testing.xgb_calibration_estimators must include at least one value.")
     if any(value <= 0 for value in spec.xgb_calibration_estimators):
         raise RuntimeError("model_testing.xgb_calibration_estimators values must all be > 0.")
+    if not spec.rf_calibration_min_samples_leaf:
+        raise RuntimeError("model_testing.rf_calibration_min_samples_leaf must include at least one value.")
+    if any(value <= 0 for value in spec.rf_calibration_min_samples_leaf):
+        raise RuntimeError("model_testing.rf_calibration_min_samples_leaf values must all be > 0.")
+    if not spec.rf_calibration_max_depth:
+        raise RuntimeError("model_testing.rf_calibration_max_depth must include at least one value.")
+    for depth in spec.rf_calibration_max_depth:
+        if depth is not None and depth <= 0:
+            raise RuntimeError("model_testing.rf_calibration_max_depth values must be positive integers or null.")
+    if not spec.rf_calibration_max_features:
+        raise RuntimeError("model_testing.rf_calibration_max_features must include at least one value.")
+    for value in spec.rf_calibration_max_features:
+        if isinstance(value, str):
+            if value not in {"sqrt", "log2"}:
+                raise RuntimeError(
+                    "model_testing.rf_calibration_max_features string values must be one of: sqrt, log2."
+                )
+        elif isinstance(value, (int, float)):
+            float_value = float(value)
+            if not (0.0 < float_value <= 1.0):
+                raise RuntimeError(
+                    "model_testing.rf_calibration_max_features numeric values must be in (0, 1]."
+                )
+        else:
+            raise RuntimeError(
+                "model_testing.rf_calibration_max_features values must be string or numeric."
+            )
+    if not spec.mlp_calibration_hidden_layer_sizes:
+        raise RuntimeError("model_testing.mlp_calibration_hidden_layer_sizes must include at least one value.")
+    for layers in spec.mlp_calibration_hidden_layer_sizes:
+        if not layers or any(int(v) <= 0 for v in layers):
+            raise RuntimeError(
+                "model_testing.mlp_calibration_hidden_layer_sizes entries must be non-empty positive integer lists."
+            )
+    if not spec.mlp_calibration_alpha:
+        raise RuntimeError("model_testing.mlp_calibration_alpha must include at least one value.")
+    if any(float(v) <= 0 for v in spec.mlp_calibration_alpha):
+        raise RuntimeError("model_testing.mlp_calibration_alpha values must be > 0.")
 
 
 def _resolve_cv_spec(payload: dict[str, object], *, default_n_splits: int) -> CVSpec:
@@ -616,7 +663,7 @@ def load_experiment_config(path: str) -> ExperimentConfig:
             str(value)
             for value in model_testing_payload.get(
                 "default_model_families",
-                ["linear_l2", "xgb1", "mlp", "elasticnet", "randomforest"],
+                ["linear_l2", "xgb1", "mlp", "randomforest"],
             )
         ],
         run_advanced_models_default=bool(
@@ -638,6 +685,47 @@ def load_experiment_config(path: str) -> ExperimentConfig:
         ],
         use_latest_xgb_calibration_default=bool(
             model_testing_payload.get("use_latest_xgb_calibration_default", False)
+        ),
+        rf_calibration_min_samples_leaf=[
+            int(value)
+            for value in model_testing_payload.get(
+                "rf_calibration_min_samples_leaf",
+                [2, 3, 4, 5],
+            )
+        ],
+        rf_calibration_max_depth=[
+            (None if value is None else int(value))
+            for value in model_testing_payload.get(
+                "rf_calibration_max_depth",
+                [None, 10, 20, 30],
+            )
+        ],
+        rf_calibration_max_features=[
+            (str(value) if isinstance(value, str) else float(value))
+            for value in model_testing_payload.get(
+                "rf_calibration_max_features",
+                ["sqrt", 0.5],
+            )
+        ],
+        use_latest_rf_calibration_default=bool(
+            model_testing_payload.get("use_latest_rf_calibration_default", False)
+        ),
+        mlp_calibration_hidden_layer_sizes=[
+            [int(v) for v in layer]
+            for layer in model_testing_payload.get(
+                "mlp_calibration_hidden_layer_sizes",
+                [[8], [16], [32], [16, 8]],
+            )
+        ],
+        mlp_calibration_alpha=[
+            float(value)
+            for value in model_testing_payload.get(
+                "mlp_calibration_alpha",
+                [0.001, 0.01, 0.1],
+            )
+        ],
+        use_latest_mlp_calibration_default=bool(
+            model_testing_payload.get("use_latest_mlp_calibration_default", False)
         ),
     )
     _validate_model_testing(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import scrolledtext, ttk
@@ -9,6 +10,8 @@ from tkinter import scrolledtext, ttk
 from src.data.targets import load_target_family
 from src.pipeline.config import ExperimentConfig, load_experiment_config
 from src.pipeline.distillation import run_pipeline
+from src.pipeline.mlp_calibration import load_latest_mlp_calibration
+from src.pipeline.rf_calibration import load_latest_rf_calibration
 from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides
 
@@ -37,9 +40,19 @@ class LauncherSelections:
     candidate_feature_sets: list[str] | None = None
     model_families: list[str] | None = None
     output_modes: list[str] | None = None
+    model_family_output_modes: dict[str, list[str]] | None = None
     run_advanced_models: bool | None = None
     xgb_calibration_estimators: list[int] | None = None
     use_latest_xgb_calibration: bool | None = None
+    rf_calibration_min_samples_leaf: list[int] | None = None
+    rf_calibration_max_depth: list[int | None] | None = None
+    rf_calibration_max_features: list[str | float] | None = None
+    use_latest_rf_calibration: bool | None = None
+    mlp_calibration_hidden_layer_sizes: list[list[int]] | None = None
+    mlp_calibration_alpha: list[float] | None = None
+    use_latest_mlp_calibration: bool | None = None
+    mlp_hidden_layer_sizes: list[int] | None = None
+    mlp_alpha: float | None = None
 
 
 def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
@@ -59,9 +72,19 @@ def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
         candidate_feature_sets=selections.candidate_feature_sets,
         model_families=selections.model_families,
         output_modes=selections.output_modes,
+        model_family_output_modes=selections.model_family_output_modes,
         run_advanced_models=selections.run_advanced_models,
         xgb_calibration_estimators=selections.xgb_calibration_estimators,
         use_latest_xgb_calibration=selections.use_latest_xgb_calibration,
+        rf_calibration_min_samples_leaf=selections.rf_calibration_min_samples_leaf,
+        rf_calibration_max_depth=selections.rf_calibration_max_depth,
+        rf_calibration_max_features=selections.rf_calibration_max_features,
+        use_latest_rf_calibration=selections.use_latest_rf_calibration,
+        mlp_calibration_hidden_layer_sizes=selections.mlp_calibration_hidden_layer_sizes,
+        mlp_calibration_alpha=selections.mlp_calibration_alpha,
+        use_latest_mlp_calibration=selections.use_latest_mlp_calibration,
+        mlp_hidden_layer_sizes=selections.mlp_hidden_layer_sizes,
+        mlp_alpha=selections.mlp_alpha,
     )
 
 
@@ -80,6 +103,9 @@ class RunLauncher(ttk.Frame):
         self.worker: threading.Thread | None = None
         self._loaded_config: ExperimentConfig | None = None
         self._defaults: dict[str, object] = {}
+        self._run_started_monotonic: float | None = None
+        self._last_heartbeat_monotonic: float = 0.0
+        self._heartbeat_interval_seconds: float = 20.0
 
         self.config_path_var = tk.StringVar(value=initial_config_path)
         self.defaults_summary_var = tk.StringVar(value="")
@@ -95,6 +121,7 @@ class RunLauncher(ttk.Frame):
         self.embedding_model_var = tk.StringVar(value="sentence-transformers/all-MiniLM-L6-v2")
         self.repeat_cv_var = tk.BooleanVar(value=False)
         self.repeat_count_var = tk.StringVar(value="1")
+        self.setup_nested_cv_var = tk.BooleanVar(value=False)
         self.save_predictions_var = tk.BooleanVar(value=True)
 
         self.mt_target_family_var = tk.StringVar(value="v25_policies")
@@ -104,10 +131,19 @@ class RunLauncher(ttk.Frame):
         self.mt_run_advanced_var = tk.BooleanVar(value=False)
         self.mt_embedding_model_var = tk.StringVar(value="sentence-transformers/all-MiniLM-L6-v2")
         self.mt_use_latest_xgb_calibration_var = tk.BooleanVar(value=False)
+        self.mt_use_latest_rf_calibration_var = tk.BooleanVar(value=False)
+        self.mt_use_latest_mlp_calibration_var = tk.BooleanVar(value=False)
+        self.mt_mlp_hidden_layers_var = tk.StringVar(value="32")
+        self.mt_mlp_alpha_var = tk.StringVar(value="0.1")
         self.mt_calibration_sweep_var = tk.StringVar(value="")
+        self.mt_rf_calibration_sweep_var = tk.StringVar(value="")
+        self.mt_mlp_calibration_sweep_var = tk.StringVar(value="")
         self.mt_latest_calibration_var = tk.StringVar(value="No calibration loaded")
+        self.mt_latest_rf_calibration_var = tk.StringVar(value="No RF calibration loaded")
+        self.mt_latest_mlp_calibration_var = tk.StringVar(value="No MLP calibration loaded")
 
         self.feature_bank_vars: dict[str, tk.BooleanVar] = {}
+        self.setup_sentence_bundle_var: tk.BooleanVar | None = None
         self.setup_model_vars: dict[str, tk.BooleanVar] = {
             "linear_l2": tk.BooleanVar(value=True),
             "xgb1": tk.BooleanVar(value=True),
@@ -117,12 +153,30 @@ class RunLauncher(ttk.Frame):
             "linear_l2": tk.BooleanVar(value=True),
             "xgb1": tk.BooleanVar(value=True),
             "mlp": tk.BooleanVar(value=True),
-            "elasticnet": tk.BooleanVar(value=True),
+            "elasticnet": tk.BooleanVar(value=False),
             "randomforest": tk.BooleanVar(value=True),
         }
-        self.mt_output_mode_vars: dict[str, tk.BooleanVar] = {
-            "single_target": tk.BooleanVar(value=True),
-            "multi_output": tk.BooleanVar(value=False),
+        self.mt_model_family_output_vars: dict[str, dict[str, tk.BooleanVar]] = {
+            "linear_l2": {
+                "single_target": tk.BooleanVar(value=True),
+                "multi_output": tk.BooleanVar(value=False),
+            },
+            "xgb1": {
+                "single_target": tk.BooleanVar(value=True),
+                "multi_output": tk.BooleanVar(value=False),
+            },
+            "mlp": {
+                "single_target": tk.BooleanVar(value=False),
+                "multi_output": tk.BooleanVar(value=True),
+            },
+            "elasticnet": {
+                "single_target": tk.BooleanVar(value=True),
+                "multi_output": tk.BooleanVar(value=False),
+            },
+            "randomforest": {
+                "single_target": tk.BooleanVar(value=True),
+                "multi_output": tk.BooleanVar(value=False),
+            },
         }
 
         self._build_ui()
@@ -201,7 +255,9 @@ class RunLauncher(ttk.Frame):
         ttk.Button(actions, text="Run Setup Pipeline", command=self.start_run_setup).grid(row=0, column=1, padx=(8, 0), sticky="w")
         ttk.Button(actions, text="Run Model Testing", command=self.start_model_testing).grid(row=0, column=2, padx=(8, 0), sticky="w")
         ttk.Button(actions, text="Run XGB Calibration", command=self.start_xgb_calibration).grid(row=0, column=3, padx=(8, 0), sticky="w")
-        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=4, sticky="w")
+        ttk.Button(actions, text="Run RF Calibration", command=self.start_rf_calibration).grid(row=0, column=4, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run MLP Calibration", command=self.start_mlp_calibration).grid(row=0, column=5, padx=(8, 0), sticky="w")
+        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=6, sticky="w")
 
         out = ttk.LabelFrame(self, text="Output")
         out.grid(row=3, column=0, sticky="ew", pady=(0, 8))
@@ -256,11 +312,16 @@ class RunLauncher(ttk.Frame):
         ttk.Label(flags, text="Repeat count").grid(row=2, column=1, sticky="e")
         self.setup_repeat_entry = ttk.Entry(flags, textvariable=self.repeat_count_var, width=8)
         self.setup_repeat_entry.grid(row=2, column=2, sticky="w")
+        ttk.Checkbutton(
+            flags,
+            text="Use nested hyperparameter CV (untick to run fixed L2 C=5)",
+            variable=self.setup_nested_cv_var,
+        ).grid(row=3, column=0, columnspan=3, sticky="w")
         ttk.Checkbutton(flags, text="Save reasoning predictions to tmp", variable=self.save_predictions_var).grid(
-            row=3, column=0, sticky="w"
+            row=4, column=0, sticky="w"
         )
-        ttk.Label(flags, text="Embedding model").grid(row=4, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(flags, textvariable=self.embedding_model_var).grid(row=5, column=0, columnspan=3, sticky="ew")
+        ttk.Label(flags, text="Embedding model").grid(row=5, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(flags, textvariable=self.embedding_model_var).grid(row=6, column=0, columnspan=3, sticky="ew")
 
         features_frame = ttk.LabelFrame(self.setup_tab, text="Feature Banks")
         features_frame.grid(row=4, column=0, sticky="nsew", padx=(0, 8))
@@ -282,7 +343,7 @@ class RunLauncher(ttk.Frame):
 
         ttk.Label(
             self.setup_tab,
-            text="CV strategy is fixed to config defaults (5-fold outer, 3-fold inner nested) unless changed via config/CLI.",
+            text="CV defaults are 5-fold outer / 3-fold inner nested when the setup nested toggle is enabled.",
             justify="left",
             wraplength=980,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
@@ -308,8 +369,12 @@ class RunLauncher(ttk.Frame):
         candidates.grid(row=2, column=0, sticky="nsew", padx=(0, 8), pady=(8, 8))
         self.mt_candidates_frame = candidates
 
-        families = ttk.LabelFrame(self.testing_tab, text="Model Families")
-        families.grid(row=2, column=1, sticky="nsew", pady=(8, 8))
+        families = ttk.LabelFrame(self.testing_tab, text="Model Families + Output Modes")
+        families.grid(row=2, column=1, columnspan=2, sticky="nsew", pady=(8, 8), padx=(8, 0))
+        ttk.Label(families, text="Family").grid(row=0, column=0, sticky="w")
+        ttk.Label(families, text="Use").grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(families, text="Single").grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(families, text="Multi").grid(row=0, column=3, sticky="w", padx=(8, 0))
         for row, (key, label) in enumerate(
             [
                 ("linear_l2", "Linear L2 (Ridge/LogReg)"),
@@ -317,22 +382,19 @@ class RunLauncher(ttk.Frame):
                 ("mlp", "MLP"),
                 ("elasticnet", "ElasticNet"),
                 ("randomforest", "RandomForest"),
-            ]
+            ],
+            start=1,
         ):
-            ttk.Checkbutton(families, text=label, variable=self.mt_model_family_vars[key]).grid(row=row, column=0, sticky="w")
-
-        output_types = ttk.LabelFrame(self.testing_tab, text="Output Types")
-        output_types.grid(row=2, column=2, sticky="nsew", padx=(8, 0), pady=(8, 8))
-        ttk.Checkbutton(
-            output_types,
-            text="16 single-target models",
-            variable=self.mt_output_mode_vars["single_target"],
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(
-            output_types,
-            text="1 multi-output model",
-            variable=self.mt_output_mode_vars["multi_output"],
-        ).grid(row=1, column=0, sticky="w")
+            ttk.Label(families, text=label).grid(row=row, column=0, sticky="w")
+            ttk.Checkbutton(families, variable=self.mt_model_family_vars[key]).grid(row=row, column=1, sticky="w", padx=(8, 0))
+            ttk.Checkbutton(
+                families,
+                variable=self.mt_model_family_output_vars[key]["single_target"],
+            ).grid(row=row, column=2, sticky="w", padx=(8, 0))
+            ttk.Checkbutton(
+                families,
+                variable=self.mt_model_family_output_vars[key]["multi_output"],
+            ).grid(row=row, column=3, sticky="w", padx=(8, 0))
 
         settings = ttk.LabelFrame(self.testing_tab, text="Settings")
         settings.grid(row=3, column=0, columnspan=3, sticky="ew")
@@ -354,22 +416,44 @@ class RunLauncher(ttk.Frame):
             text="Use latest XGB calibration defaults",
             variable=self.mt_use_latest_xgb_calibration_var,
         ).grid(row=1, column=1, sticky="w")
+        ttk.Checkbutton(
+            settings,
+            text="Use latest RF calibration defaults",
+            variable=self.mt_use_latest_rf_calibration_var,
+        ).grid(row=2, column=1, sticky="w")
+        ttk.Checkbutton(
+            settings,
+            text="Use latest MLP calibration defaults",
+            variable=self.mt_use_latest_mlp_calibration_var,
+        ).grid(row=3, column=1, sticky="w")
         ttk.Checkbutton(settings, text="Force rebuild intermediary banks", variable=self.mt_force_rebuild_var).grid(
             row=1, column=2, sticky="w"
         )
-        ttk.Label(settings, text="Embedding model").grid(row=2, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(settings, textvariable=self.mt_embedding_model_var).grid(row=2, column=1, columnspan=2, sticky="ew", pady=(4, 0))
-        ttk.Label(settings, text="Calibration sweep").grid(row=3, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(settings, textvariable=self.mt_calibration_sweep_var, justify="left").grid(row=3, column=1, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Label(settings, text="Latest calibration").grid(row=4, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(settings, text="Embedding model").grid(row=4, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(settings, textvariable=self.mt_embedding_model_var).grid(row=4, column=1, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Label(settings, text="XGB calibration sweep").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(settings, textvariable=self.mt_calibration_sweep_var, justify="left").grid(row=5, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(settings, text="RF calibration sweep").grid(row=6, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(settings, textvariable=self.mt_rf_calibration_sweep_var, justify="left").grid(row=6, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(settings, text="MLP calibration sweep").grid(row=7, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(settings, textvariable=self.mt_mlp_calibration_sweep_var, justify="left").grid(row=7, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(settings, text="Latest XGB calibration").grid(row=8, column=0, sticky="w", pady=(4, 0))
         ttk.Label(settings, textvariable=self.mt_latest_calibration_var, justify="left", wraplength=900).grid(
-            row=4, column=1, columnspan=2, sticky="w", pady=(4, 0)
+            row=8, column=1, columnspan=2, sticky="w", pady=(4, 0)
+        )
+        ttk.Label(settings, text="Latest RF calibration").grid(row=9, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(settings, textvariable=self.mt_latest_rf_calibration_var, justify="left", wraplength=900).grid(
+            row=9, column=1, columnspan=2, sticky="w", pady=(4, 0)
+        )
+        ttk.Label(settings, text="Latest MLP calibration").grid(row=10, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(settings, textvariable=self.mt_latest_mlp_calibration_var, justify="left", wraplength=900).grid(
+            row=10, column=1, columnspan=2, sticky="w", pady=(4, 0)
         )
         ttk.Label(
             settings,
             text="Screening is training-only: held-out/test features and labels are not used.",
             justify="left",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def _load_config_preview(self) -> None:
         config = load_experiment_config(self.config_path_var.get().strip())
@@ -386,15 +470,40 @@ class RunLauncher(ttk.Frame):
         self.heldout_var.set(bool(config.defaults.heldout_evaluation))
         self.repeat_cv_var.set(False)
         self.repeat_count_var.set("1")
+        self.setup_nested_cv_var.set(False)
         self.mt_repeat_cv_var.set(False)
         self.mt_repeat_count_var.set("1")
         self.mt_run_advanced_var.set(bool(config.model_testing.run_advanced_models_default))
         self.mt_use_latest_xgb_calibration_var.set(bool(config.model_testing.use_latest_xgb_calibration_default))
+        self.mt_use_latest_rf_calibration_var.set(bool(config.model_testing.use_latest_rf_calibration_default))
+        self.mt_use_latest_mlp_calibration_var.set(bool(config.model_testing.use_latest_mlp_calibration_default))
+        default_model_families = set(config.model_testing.default_model_families)
+        for family_id, var in self.mt_model_family_vars.items():
+            var.set(family_id in default_model_families)
+        for family_id, mode_vars in self.mt_model_family_output_vars.items():
+            if family_id == "mlp":
+                mode_vars["single_target"].set(False)
+                mode_vars["multi_output"].set(True)
+            else:
+                mode_vars["single_target"].set(True)
+                mode_vars["multi_output"].set(False)
         self.mt_calibration_sweep_var.set(
             ", ".join(str(value) for value in config.model_testing.xgb_calibration_estimators)
         )
-        self.mt_output_mode_vars["single_target"].set(True)
-        self.mt_output_mode_vars["multi_output"].set(False)
+        self.mt_rf_calibration_sweep_var.set(
+            "min_leaf="
+            + ",".join(str(value) for value in config.model_testing.rf_calibration_min_samples_leaf)
+            + " | max_depth="
+            + ",".join("None" if value is None else str(value) for value in config.model_testing.rf_calibration_max_depth)
+            + " | max_features="
+            + ",".join(str(value) for value in config.model_testing.rf_calibration_max_features)
+        )
+        self.mt_mlp_calibration_sweep_var.set(
+            "hidden_layer_sizes="
+            + ", ".join(str(tuple(layer)) for layer in config.model_testing.mlp_calibration_hidden_layer_sizes)
+            + " | alpha="
+            + ",".join(str(value) for value in config.model_testing.mlp_calibration_alpha)
+        )
         latest = load_latest_xgb_calibration(config.experiment_id)
         if latest is None:
             self.mt_latest_calibration_var.set("No calibration found")
@@ -402,6 +511,22 @@ class RunLauncher(ttk.Frame):
             selected = latest.get("selected_n_estimators_by_family", {})
             self.mt_latest_calibration_var.set(
                 f"from {latest.get('run_dir', 'unknown')}: {selected}"
+            )
+        latest_rf = load_latest_rf_calibration(config.experiment_id)
+        if latest_rf is None:
+            self.mt_latest_rf_calibration_var.set("No RF calibration found")
+        else:
+            selected_rf = latest_rf.get("selected_params_by_family", {})
+            self.mt_latest_rf_calibration_var.set(
+                f"from {latest_rf.get('run_dir', 'unknown')}: {selected_rf}"
+            )
+        latest_mlp = load_latest_mlp_calibration(config.experiment_id)
+        if latest_mlp is None:
+            self.mt_latest_mlp_calibration_var.set("No MLP calibration found")
+        else:
+            selected_mlp = latest_mlp.get("selected_params_by_family", {})
+            self.mt_latest_mlp_calibration_var.set(
+                f"from {latest_mlp.get('run_dir', 'unknown')}: {selected_mlp}"
             )
 
         for spec in config.intermediary_features:
@@ -427,13 +552,16 @@ class RunLauncher(ttk.Frame):
         for child in self.setup_features_frame.winfo_children():
             child.destroy()
         self.feature_bank_vars.clear()
+        self.setup_sentence_bundle_var = None
         if self._loaded_config is None:
             return
         default_selected = {"hq_baseline", "llm_engineering", "lambda_policies", "sentence_prose", "sentence_structured"}
         row = 0
+        available_bank_ids: set[str] = set()
         for spec in [*self._loaded_config.repository_feature_banks, *self._loaded_config.intermediary_features]:
             if not spec.enabled:
                 continue
+            available_bank_ids.add(spec.feature_bank_id)
             value = spec.feature_bank_id in default_selected
             var = tk.BooleanVar(value=value)
             self.feature_bank_vars[spec.feature_bank_id] = var
@@ -441,6 +569,24 @@ class RunLauncher(ttk.Frame):
                 row=row, column=0, sticky="w"
             )
             row += 1
+
+        if {"sentence_prose", "sentence_structured"}.issubset(available_bank_ids):
+            bundle_default = bool(
+                self.feature_bank_vars["sentence_prose"].get()
+                and self.feature_bank_vars["sentence_structured"].get()
+            )
+            self.setup_sentence_bundle_var = tk.BooleanVar(value=bundle_default)
+            ttk.Checkbutton(
+                self.setup_features_frame,
+                text="sentence_bundle",
+                variable=self.setup_sentence_bundle_var,
+            ).grid(row=row, column=0, sticky="w", pady=(6, 0))
+            row += 1
+            ttk.Label(
+                self.setup_features_frame,
+                text="bundle = prose + structured",
+                justify="left",
+            ).grid(row=row, column=0, sticky="w")
 
     def _rebuild_testing_candidate_controls(self) -> None:
         for child in self.mt_candidates_frame.winfo_children():
@@ -450,6 +596,10 @@ class RunLauncher(ttk.Frame):
             return
         defaults = set(self._loaded_config.model_testing.candidate_feature_sets)
         allowed = {
+            "hq_plus_sentence_prose",
+            "llm_engineering_plus_sentence_prose",
+            "lambda_policies_plus_sentence_prose",
+            "sentence_prose",
             "hq_plus_sentence_bundle",
             "llm_engineering_plus_sentence_bundle",
             "lambda_policies_plus_sentence_bundle",
@@ -460,7 +610,7 @@ class RunLauncher(ttk.Frame):
             feature_set_id = spec.feature_set_id
             if feature_set_id not in allowed:
                 continue
-            value = True if feature_set_id == "sentence_bundle" else (feature_set_id in defaults)
+            value = feature_set_id in defaults
             var = tk.BooleanVar(value=value)
             self.mt_feature_set_vars[feature_set_id] = var
             ttk.Checkbutton(self.mt_candidates_frame, text=feature_set_id, variable=var).grid(
@@ -559,22 +709,34 @@ class RunLauncher(ttk.Frame):
 
     def _setup_selections(self) -> LauncherSelections:
         common = self._build_common_kwargs()
+        selected_target_family = self.target_family_var.get().strip()
         models: list[str] = []
         if self.setup_model_vars["linear_l2"].get():
-            models.extend(["ridge", "logreg_classifier"])
+            if selected_target_family in {"v25_policies", "v25_and_taste"}:
+                models.append("ridge")
+            if selected_target_family in {"taste_policies", "v25_and_taste"}:
+                models.append("logreg_classifier")
         if self.setup_model_vars["xgb1"].get():
-            models.extend(["xgb1_regressor", "xgb1_classifier"])
+            if selected_target_family in {"v25_policies", "v25_and_taste"}:
+                models.append("xgb1_regressor")
+            if selected_target_family in {"taste_policies", "v25_and_taste"}:
+                models.append("xgb1_classifier")
+        active_feature_banks = [key for key, var in self.feature_bank_vars.items() if var.get()]
+        if self.setup_sentence_bundle_var is not None and self.setup_sentence_bundle_var.get():
+            for sentence_bank in ("sentence_prose", "sentence_structured"):
+                if sentence_bank not in active_feature_banks:
+                    active_feature_banks.append(sentence_bank)
         return LauncherSelections(
             run_mode=self.run_mode_var.get().strip(),
-            target_family=self.target_family_var.get().strip(),
+            target_family=selected_target_family,
             heldout_evaluation=bool(self.heldout_var.get()),
-            active_feature_banks=[key for key, var in self.feature_bank_vars.items() if var.get()],
+            active_feature_banks=active_feature_banks,
             force_rebuild_intermediary_features=bool(self.force_rebuild_var.get()),
             reasoning_models=models,
             embedding_model_name=self.embedding_model_var.get().strip() or None,
             repeat_cv_with_new_seeds=bool(self.repeat_cv_var.get()),
             cv_seed_repeat_count=self._parse_optional_int(self.repeat_count_var.get()),
-            distillation_nested_sweep=True,
+            distillation_nested_sweep=bool(self.setup_nested_cv_var.get()),
             save_reasoning_predictions=bool(self.save_predictions_var.get()),
             candidate_feature_sets=None,
             model_families=None,
@@ -584,6 +746,19 @@ class RunLauncher(ttk.Frame):
 
     def _testing_selections(self) -> LauncherSelections:
         common = self._build_common_kwargs()
+        model_families = [key for key, var in self.mt_model_family_vars.items() if var.get()]
+        model_family_output_modes: dict[str, list[str]] = {}
+        for family_id in model_families:
+            selected_modes = [
+                mode
+                for mode, var in self.mt_model_family_output_vars[family_id].items()
+                if var.get()
+            ]
+            model_family_output_modes[family_id] = selected_modes
+        output_modes: list[str] = []
+        for mode in ("single_target", "multi_output"):
+            if any(mode in model_family_output_modes.get(family_id, []) for family_id in model_families):
+                output_modes.append(mode)
         return LauncherSelections(
             run_mode="model_testing_mode",
             target_family=self.mt_target_family_var.get().strip(),
@@ -597,14 +772,17 @@ class RunLauncher(ttk.Frame):
             distillation_nested_sweep=False,
             save_reasoning_predictions=False,
             candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
-            model_families=[key for key, var in self.mt_model_family_vars.items() if var.get()],
-            output_modes=[key for key, var in self.mt_output_mode_vars.items() if var.get()],
+            model_families=model_families,
+            output_modes=output_modes,
+            model_family_output_modes=model_family_output_modes,
             run_advanced_models=bool(self.mt_run_advanced_var.get()),
             use_latest_xgb_calibration=bool(self.mt_use_latest_xgb_calibration_var.get()),
+            use_latest_rf_calibration=bool(self.mt_use_latest_rf_calibration_var.get()),
+            use_latest_mlp_calibration=bool(self.mt_use_latest_mlp_calibration_var.get()),
             **common,
         )
 
-    def _calibration_selections(self) -> LauncherSelections:
+    def _xgb_calibration_selections(self) -> LauncherSelections:
         common = self._build_common_kwargs()
         sweep = []
         if self._loaded_config is not None:
@@ -627,6 +805,73 @@ class RunLauncher(ttk.Frame):
             run_advanced_models=False,
             xgb_calibration_estimators=sweep,
             use_latest_xgb_calibration=False,
+            use_latest_rf_calibration=False,
+            use_latest_mlp_calibration=False,
+            **common,
+        )
+
+    def _rf_calibration_selections(self) -> LauncherSelections:
+        common = self._build_common_kwargs()
+        min_leaf = []
+        max_depth = []
+        max_features = []
+        if self._loaded_config is not None:
+            min_leaf = list(self._loaded_config.model_testing.rf_calibration_min_samples_leaf)
+            max_depth = list(self._loaded_config.model_testing.rf_calibration_max_depth)
+            max_features = list(self._loaded_config.model_testing.rf_calibration_max_features)
+        return LauncherSelections(
+            run_mode="rf_calibration_mode",
+            target_family=self.mt_target_family_var.get().strip(),
+            heldout_evaluation=False,
+            active_feature_banks=None,
+            force_rebuild_intermediary_features=bool(self.mt_force_rebuild_var.get()),
+            reasoning_models=None,
+            embedding_model_name=self.mt_embedding_model_var.get().strip() or None,
+            repeat_cv_with_new_seeds=False,
+            cv_seed_repeat_count=1,
+            distillation_nested_sweep=False,
+            save_reasoning_predictions=False,
+            candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
+            model_families=["randomforest"],
+            output_modes=["single_target"],
+            run_advanced_models=False,
+            use_latest_xgb_calibration=False,
+            rf_calibration_min_samples_leaf=min_leaf,
+            rf_calibration_max_depth=max_depth,
+            rf_calibration_max_features=max_features,
+            use_latest_rf_calibration=False,
+            use_latest_mlp_calibration=False,
+            **common,
+        )
+
+    def _mlp_calibration_selections(self) -> LauncherSelections:
+        common = self._build_common_kwargs()
+        hidden_layers: list[list[int]] = []
+        alpha_values: list[float] = []
+        if self._loaded_config is not None:
+            hidden_layers = [list(layer) for layer in self._loaded_config.model_testing.mlp_calibration_hidden_layer_sizes]
+            alpha_values = list(self._loaded_config.model_testing.mlp_calibration_alpha)
+        return LauncherSelections(
+            run_mode="mlp_calibration_mode",
+            target_family=self.mt_target_family_var.get().strip(),
+            heldout_evaluation=False,
+            active_feature_banks=None,
+            force_rebuild_intermediary_features=bool(self.mt_force_rebuild_var.get()),
+            reasoning_models=None,
+            embedding_model_name=self.mt_embedding_model_var.get().strip() or None,
+            repeat_cv_with_new_seeds=False,
+            cv_seed_repeat_count=1,
+            distillation_nested_sweep=False,
+            save_reasoning_predictions=False,
+            candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
+            model_families=["mlp"],
+            output_modes=["single_target"],
+            run_advanced_models=False,
+            use_latest_xgb_calibration=False,
+            use_latest_rf_calibration=False,
+            mlp_calibration_hidden_layer_sizes=hidden_layers,
+            mlp_calibration_alpha=alpha_values,
+            use_latest_mlp_calibration=False,
             **common,
         )
 
@@ -656,8 +901,11 @@ class RunLauncher(ttk.Frame):
                 raise ValueError("Select at least one candidate feature set.")
             if not selections.model_families:
                 raise ValueError("Select at least one model family.")
-            if not selections.output_modes:
-                raise ValueError("Select at least one output type.")
+            if selections.model_family_output_modes is None:
+                raise ValueError("Model-family output mapping was not initialized.")
+            for family_id in selections.model_families:
+                if not selections.model_family_output_modes.get(family_id):
+                    raise ValueError(f"Select at least one output type for model family '{family_id}'.")
             if selections.repeat_cv_with_new_seeds and (selections.cv_seed_repeat_count or 0) < 2:
                 raise ValueError("Repeat count must be >= 2 when repeat CV is enabled.")
         except ValueError as exc:
@@ -668,7 +916,7 @@ class RunLauncher(ttk.Frame):
 
     def start_xgb_calibration(self) -> None:
         try:
-            selections = self._calibration_selections()
+            selections = self._xgb_calibration_selections()
             if not selections.candidate_feature_sets:
                 raise ValueError("Select at least one candidate feature set.")
             if not selections.xgb_calibration_estimators:
@@ -679,6 +927,38 @@ class RunLauncher(ttk.Frame):
             return
         self._start_worker(selections, "Starting XGB calibration pipeline.")
 
+    def start_rf_calibration(self) -> None:
+        try:
+            selections = self._rf_calibration_selections()
+            if not selections.candidate_feature_sets:
+                raise ValueError("Select at least one candidate feature set.")
+            if not selections.rf_calibration_min_samples_leaf:
+                raise ValueError("RF calibration min_samples_leaf sweep cannot be empty.")
+            if not selections.rf_calibration_max_depth:
+                raise ValueError("RF calibration max_depth sweep cannot be empty.")
+            if not selections.rf_calibration_max_features:
+                raise ValueError("RF calibration max_features sweep cannot be empty.")
+        except ValueError as exc:
+            self.status_var.set("Invalid input")
+            self._append_log(f"ERROR: {exc}")
+            return
+        self._start_worker(selections, "Starting RF calibration pipeline.")
+
+    def start_mlp_calibration(self) -> None:
+        try:
+            selections = self._mlp_calibration_selections()
+            if not selections.candidate_feature_sets:
+                raise ValueError("Select at least one candidate feature set.")
+            if not selections.mlp_calibration_hidden_layer_sizes:
+                raise ValueError("MLP calibration hidden_layer_sizes sweep cannot be empty.")
+            if not selections.mlp_calibration_alpha:
+                raise ValueError("MLP calibration alpha sweep cannot be empty.")
+        except ValueError as exc:
+            self.status_var.set("Invalid input")
+            self._append_log(f"ERROR: {exc}")
+            return
+        self._start_worker(selections, "Starting MLP calibration pipeline.")
+
     def _start_worker(self, selections: LauncherSelections, start_message: str) -> None:
         if self.worker is not None and self.worker.is_alive():
             self.status_var.set("Run already in progress")
@@ -686,6 +966,8 @@ class RunLauncher(ttk.Frame):
         self.status_var.set("Running")
         self.output_path_var.set("")
         self._append_log(start_message)
+        self._run_started_monotonic = time.monotonic()
+        self._last_heartbeat_monotonic = self._run_started_monotonic
         overrides = selections_to_overrides(selections)
 
         def worker() -> None:
@@ -712,10 +994,20 @@ class RunLauncher(ttk.Frame):
             elif event_type == "error":
                 self.status_var.set("Failed")
                 self._append_log(f"ERROR: {payload}")
+                self._run_started_monotonic = None
             elif event_type == "done":
                 self.status_var.set("Complete")
                 self.output_path_var.set(payload)
                 self._append_log(f"Run finished. Artifacts: {payload}")
+                self._run_started_monotonic = None
+        if self.worker is not None and self.worker.is_alive() and self._run_started_monotonic is not None:
+            now = time.monotonic()
+            elapsed = int(now - self._run_started_monotonic)
+            mins, secs = divmod(elapsed, 60)
+            self.status_var.set(f"Running ({mins:02d}:{secs:02d})")
+            if (now - self._last_heartbeat_monotonic) >= self._heartbeat_interval_seconds:
+                self._append_log(f"Heartbeat: run is still active ({mins:02d}:{secs:02d} elapsed).")
+                self._last_heartbeat_monotonic = now
         self.after(100, self._poll_queue)
 
 

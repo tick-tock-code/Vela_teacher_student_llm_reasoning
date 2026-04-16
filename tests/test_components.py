@@ -28,13 +28,16 @@ from src.llm_engineering.custom_prompts import (
 )
 from src.pipeline.model_testing import (
     _aggregate_screening_metrics,
+    _estimate_stage_a_outer_fit_count,
     _resolve_stage_a_model_families,
     run_model_testing_mode,
 )
 from src.pipeline.config import FeatureSetSpec, load_experiment_config
 from src.pipeline.run_distillation import parse_run_overrides
 from src.pipeline.run_options import RunOverrides, resolve_run_options
+from src.pipeline.mlp_calibration import load_latest_mlp_calibration
 from src.pipeline.xgb_calibration import load_latest_xgb_calibration
+from src.pipeline.rf_calibration import load_latest_rf_calibration
 
 
 def _workspace_temp_dir() -> Path:
@@ -371,6 +374,23 @@ class ComponentTests(unittest.TestCase):
             self.assertIn("reproduction_mode", launcher.setup_mode_combo.cget("values"))
             self.assertIn("v25_policies", launcher.setup_target_combo.cget("values"))
             self.assertIn("v25_and_taste", launcher.mt_target_combo.cget("values"))
+            self.assertFalse(launcher.setup_nested_cv_var.get())
+            self.assertIsNotNone(launcher.setup_sentence_bundle_var)
+            self.assertTrue(launcher.mt_model_family_output_vars["mlp"]["multi_output"].get())
+            self.assertFalse(launcher.mt_model_family_output_vars["mlp"]["single_target"].get())
+
+            launcher.run_mode_var.set("reasoning_distillation_mode")
+            launcher.target_family_var.set("taste_policies")
+            launcher.setup_model_vars["linear_l2"].set(True)
+            launcher.setup_nested_cv_var.set(False)
+            launcher.feature_bank_vars["sentence_prose"].set(False)
+            launcher.feature_bank_vars["sentence_structured"].set(False)
+            if launcher.setup_sentence_bundle_var is not None:
+                launcher.setup_sentence_bundle_var.set(True)
+            setup_selections = launcher._setup_selections()
+            self.assertFalse(setup_selections.distillation_nested_sweep)
+            self.assertIn("sentence_prose", setup_selections.active_feature_banks)
+            self.assertIn("sentence_structured", setup_selections.active_feature_banks)
 
             selections = LauncherSelections(
                 config_path="experiments/teacher_student_distillation_v1.json",
@@ -422,6 +442,18 @@ class ComponentTests(unittest.TestCase):
             ["logreg_classifier", "xgb1_classifier"],
         )
 
+    def test_reasoning_distillation_defaults_nested_sweep_to_off(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="reasoning_distillation_mode",
+                target_family="v25_policies",
+                active_feature_banks=["hq_baseline"],
+            ),
+        )
+        self.assertFalse(resolved.distillation_nested_sweep)
+
     def test_model_testing_mode_accepts_multi_output_selection(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
         resolved = resolve_run_options(
@@ -435,6 +467,33 @@ class ComponentTests(unittest.TestCase):
             ),
         )
         self.assertEqual(resolved.output_modes, ["single_target", "multi_output"])
+
+    def test_model_testing_mode_defaults_mlp_to_multi_output(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="model_testing_mode",
+                target_family="v25_policies",
+                candidate_feature_sets=["sentence_bundle"],
+                model_families=["mlp"],
+            ),
+        )
+        self.assertEqual(resolved.output_modes, ["multi_output"])
+        self.assertEqual(resolved.model_family_output_modes, {"mlp": ["multi_output"]})
+
+    def test_reasoning_distillation_defaults_mlp_to_multi_output(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="reasoning_distillation_mode",
+                target_family="v25_policies",
+                active_feature_banks=["hq_baseline"],
+                reasoning_models=["mlp_regressor"],
+            ),
+        )
+        self.assertEqual(resolved.output_modes, ["multi_output"])
 
     def test_xgb_calibration_mode_resolves_xgb_only_and_disables_heldout(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
@@ -451,6 +510,38 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual([spec.model_id for spec in resolved.distillation_models], ["xgb1_regressor"])
         self.assertEqual(resolved.output_modes, ["single_target"])
         self.assertEqual(resolved.model_families, ["xgb1"])
+
+    def test_rf_calibration_mode_resolves_rf_only_and_disables_heldout(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="rf_calibration_mode",
+                target_family="v25_policies",
+                candidate_feature_sets=["sentence_bundle"],
+            ),
+        )
+        self.assertEqual(resolved.run_mode, "rf_calibration_mode")
+        self.assertFalse(resolved.heldout_evaluation)
+        self.assertEqual([spec.model_id for spec in resolved.distillation_models], ["randomforest_regressor"])
+        self.assertEqual(resolved.output_modes, ["single_target"])
+        self.assertEqual(resolved.model_families, ["randomforest"])
+
+    def test_mlp_calibration_mode_resolves_mlp_only_and_disables_heldout(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="mlp_calibration_mode",
+                target_family="v25_policies",
+                candidate_feature_sets=["sentence_bundle"],
+            ),
+        )
+        self.assertEqual(resolved.run_mode, "mlp_calibration_mode")
+        self.assertFalse(resolved.heldout_evaluation)
+        self.assertEqual([spec.model_id for spec in resolved.distillation_models], ["mlp_regressor"])
+        self.assertEqual(resolved.output_modes, ["single_target"])
+        self.assertEqual(resolved.model_families, ["mlp"])
 
     def test_cli_parsing_supports_xgb_calibration_flags(self) -> None:
         overrides = parse_run_overrides(
@@ -477,6 +568,66 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(overrides.xgb_calibration_estimators, [40, 80, 120])
         self.assertTrue(overrides.use_latest_xgb_calibration)
 
+    def test_cli_parsing_supports_rf_calibration_flags(self) -> None:
+        overrides = parse_run_overrides(
+            [
+                "--config",
+                "experiments/teacher_student_distillation_v1.json",
+                "--run-mode",
+                "rf_calibration_mode",
+                "--target-family",
+                "v25_and_taste",
+                "--candidate-feature-sets",
+                "hq_plus_sentence_bundle",
+                "lambda_policies_plus_sentence_bundle",
+                "--rf-calibration-min-samples-leaf",
+                "2",
+                "4",
+                "--rf-calibration-max-depth",
+                "none",
+                "20",
+                "--rf-calibration-max-features",
+                "sqrt",
+                "0.5",
+                "--use-latest-rf-calibration",
+            ]
+        )
+        self.assertEqual(overrides.run_mode, "rf_calibration_mode")
+        self.assertEqual(overrides.target_family, "v25_and_taste")
+        self.assertEqual(overrides.candidate_feature_sets, ["hq_plus_sentence_bundle", "lambda_policies_plus_sentence_bundle"])
+        self.assertEqual(overrides.rf_calibration_min_samples_leaf, [2, 4])
+        self.assertEqual(overrides.rf_calibration_max_depth, [None, 20])
+        self.assertEqual(overrides.rf_calibration_max_features, ["sqrt", 0.5])
+        self.assertTrue(overrides.use_latest_rf_calibration)
+
+    def test_cli_parsing_supports_mlp_calibration_flags(self) -> None:
+        overrides = parse_run_overrides(
+            [
+                "--config",
+                "experiments/teacher_student_distillation_v1.json",
+                "--run-mode",
+                "mlp_calibration_mode",
+                "--target-family",
+                "v25_and_taste",
+                "--candidate-feature-sets",
+                "hq_plus_sentence_prose",
+                "lambda_policies_plus_sentence_prose",
+                "--mlp-calibration-hidden-layer-sizes",
+                "8",
+                "16,8",
+                "--mlp-calibration-alpha",
+                "0.001",
+                "0.01",
+                "--use-latest-mlp-calibration",
+            ]
+        )
+        self.assertEqual(overrides.run_mode, "mlp_calibration_mode")
+        self.assertEqual(overrides.target_family, "v25_and_taste")
+        self.assertEqual(overrides.candidate_feature_sets, ["hq_plus_sentence_prose", "lambda_policies_plus_sentence_prose"])
+        self.assertEqual(overrides.mlp_calibration_hidden_layer_sizes, [[8], [16, 8]])
+        self.assertEqual(overrides.mlp_calibration_alpha, [0.001, 0.01])
+        self.assertTrue(overrides.use_latest_mlp_calibration)
+
     def test_model_testing_mode_can_enable_latest_xgb_calibration_toggle(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
         resolved = resolve_run_options(
@@ -491,8 +642,42 @@ class ComponentTests(unittest.TestCase):
         )
         self.assertTrue(resolved.use_latest_xgb_calibration)
 
+    def test_model_testing_mode_can_enable_latest_rf_calibration_toggle(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="model_testing_mode",
+                target_family="v25_policies",
+                candidate_feature_sets=["sentence_bundle"],
+                model_families=["randomforest"],
+                use_latest_rf_calibration=True,
+            ),
+        )
+        self.assertTrue(resolved.use_latest_rf_calibration)
+
+    def test_model_testing_mode_can_enable_latest_mlp_calibration_toggle(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="model_testing_mode",
+                target_family="v25_policies",
+                candidate_feature_sets=["sentence_bundle"],
+                model_families=["mlp"],
+                use_latest_mlp_calibration=True,
+            ),
+        )
+        self.assertTrue(resolved.use_latest_mlp_calibration)
+
     def test_load_latest_xgb_calibration_returns_none_when_missing(self) -> None:
         self.assertIsNone(load_latest_xgb_calibration("definitely_missing_experiment_for_test"))
+
+    def test_load_latest_rf_calibration_returns_none_when_missing(self) -> None:
+        self.assertIsNone(load_latest_rf_calibration("definitely_missing_experiment_for_test"))
+
+    def test_load_latest_mlp_calibration_returns_none_when_missing(self) -> None:
+        self.assertIsNone(load_latest_mlp_calibration("definitely_missing_experiment_for_test"))
 
     def test_screening_score_rule_marks_top_set_and_close_runners(self) -> None:
         repeat_metrics = pd.DataFrame(
@@ -522,14 +707,62 @@ class ComponentTests(unittest.TestCase):
     def test_stage_a_model_family_selection_respects_ui_choices(self) -> None:
         self.assertEqual(
             _resolve_stage_a_model_families(["linear_l2", "mlp"]),
-            ["linear_l2"],
+            ["linear_l2", "mlp"],
         )
         self.assertEqual(
             _resolve_stage_a_model_families(["xgb1", "randomforest"]),
             ["xgb1"],
         )
         with self.assertRaises(RuntimeError):
-            _resolve_stage_a_model_families(["mlp", "elasticnet", "randomforest"])
+            _resolve_stage_a_model_families(["elasticnet", "randomforest"])
+
+    def test_model_testing_stage_a_fit_count_matches_expected_mlp_multi_output_v25(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        family_map = {spec.family_id: spec for spec in config.target_families}
+        estimated = _estimate_stage_a_outer_fit_count(
+            config=config,
+            family_sequence=["v25_policies"],
+            family_map=family_map,
+            output_modes=["multi_output"],
+            model_family_output_modes={"mlp": ["multi_output"]},
+            stage_a_model_families=["mlp"],
+            repeat_count=4,
+            feature_set_count=6,
+            nested_requested=False,
+        )
+        self.assertEqual(estimated, 72)
+
+    def test_model_testing_stage_a_fit_count_matches_expected_mlp_multi_output_v25_and_taste(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        family_map = {spec.family_id: spec for spec in config.target_families}
+        estimated = _estimate_stage_a_outer_fit_count(
+            config=config,
+            family_sequence=["v25_policies", "taste_policies"],
+            family_map=family_map,
+            output_modes=["multi_output"],
+            model_family_output_modes={"mlp": ["multi_output"]},
+            stage_a_model_families=["mlp"],
+            repeat_count=4,
+            feature_set_count=6,
+            nested_requested=False,
+        )
+        self.assertEqual(estimated, 144)
+
+    def test_model_testing_stage_a_fit_count_keeps_three_fold_when_nested_requested_for_mlp(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        family_map = {spec.family_id: spec for spec in config.target_families}
+        estimated = _estimate_stage_a_outer_fit_count(
+            config=config,
+            family_sequence=["v25_policies"],
+            family_map=family_map,
+            output_modes=["multi_output"],
+            model_family_output_modes={"mlp": ["multi_output"]},
+            stage_a_model_families=["mlp"],
+            repeat_count=4,
+            feature_set_count=6,
+            nested_requested=True,
+        )
+        self.assertEqual(estimated, 72)
 
     def test_model_testing_mode_rejects_heldout_override(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")

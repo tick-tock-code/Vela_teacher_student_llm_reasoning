@@ -34,8 +34,8 @@ from src.student.reasoning_regression import (
     train_reasoning_regressors_oof,
 )
 from src.utils.artifact_io import timestamped_run_dir, write_csv, write_json, write_markdown
-from src.utils.parallel import bounded_worker_count
-from src.utils.paths import RUNS_DIR
+from src.utils.parallel import apply_global_thread_env, bounded_worker_count
+from src.utils.paths import DOCS_DIR, RUNS_DIR
 
 
 Logger = Callable[[str], None]
@@ -129,7 +129,7 @@ def _average_threshold_maps(
 def _model_param_overrides_for(
     resolved_run,
     model_id: str,
-) -> dict[str, float | int]:
+) -> dict[str, object]:
     return dict((resolved_run.xgb_model_param_overrides_by_model_id or {}).get(model_id, {}))
 
 
@@ -285,6 +285,10 @@ def _nested_param_grid(model_kind: str, task_kind: str) -> list[dict[str, float 
                         )
             return grid
     return [{}]
+
+
+def _model_has_sweepable_grid(model_kind: str, task_kind: str) -> bool:
+    return len(_nested_param_grid(model_kind, task_kind)) > 1
 
 
 def _safe_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
@@ -635,6 +639,16 @@ def run_reasoning_distillation_mode(
 
     _log(logger, f"Loading target family '{resolved_run.target_family.family_id}'.")
     target_family = load_target_family(resolved_run.target_family)
+    nested_sweep_enabled = resolved_run.distillation_nested_sweep and any(
+        _model_has_sweepable_grid(model_spec.kind, target_family.task_kind)
+        for model_spec in resolved_run.distillation_models
+    )
+    if resolved_run.distillation_nested_sweep and not nested_sweep_enabled:
+        _log(
+            logger,
+            "Nested hyperparameter sweep was requested, but selected models have no sweep grid for "
+            f"'{target_family.family_id}'. Running without nested sweep.",
+        )
     write_json(run_dir / "target_family_manifest.json", target_manifest_payload(target_family))
 
     _log(logger, "Loading repository-backed feature banks.")
@@ -702,7 +716,7 @@ def run_reasoning_distillation_mode(
                 )
             outer_n_splits = (
                 config.reproduction.outer_cv.n_splits
-                if resolved_run.distillation_nested_sweep
+                if nested_sweep_enabled
                 else config.distillation_cv.n_splits
             )
             splits = build_stratified_reasoning_cv_splits(
@@ -712,7 +726,7 @@ def run_reasoning_distillation_mode(
                 random_state=repeat_seed,
             )
 
-            if target_family.task_kind == "regression" and not resolved_run.distillation_nested_sweep:
+            if target_family.task_kind == "regression" and not nested_sweep_enabled:
                 outputs = train_reasoning_regressors_oof(
                     feature_set.public_frame[feature_set.feature_columns],
                     public_target_rows[target_columns],
@@ -728,7 +742,7 @@ def run_reasoning_distillation_mode(
                 )
                 output_prediction_tables.append(outputs.oof_predictions)
                 output_metric_tables.append(outputs.metrics.copy())
-            elif target_family.task_kind == "classification" and not resolved_run.distillation_nested_sweep:
+            elif target_family.task_kind == "classification" and not nested_sweep_enabled:
                 outputs = train_reasoning_classifiers_oof(
                     feature_set.public_frame[feature_set.feature_columns],
                     public_target_rows[target_columns],
@@ -881,7 +895,7 @@ def run_reasoning_distillation_mode(
                 )
 
             if target_family.task_kind == "regression":
-                if resolved_run.distillation_nested_sweep:
+                if nested_sweep_enabled:
                     fit_tasks: list[tuple[str, np.ndarray, int, int, object]] = []
                     for model_offset, model_spec in enumerate(resolved_run.distillation_models):
                         for target_offset, target_column in enumerate(target_columns):
@@ -962,7 +976,7 @@ def run_reasoning_distillation_mode(
                         )
                     )
             else:
-                if resolved_run.distillation_nested_sweep:
+                if nested_sweep_enabled:
                     fit_tasks: list[tuple[str, np.ndarray, int, int, object]] = []
                     for model_offset, model_spec in enumerate(resolved_run.distillation_models):
                         for target_offset, target_column in enumerate(target_columns):
@@ -1105,9 +1119,10 @@ def run_reasoning_distillation_mode(
         f"- Max parallel workers: {resolved_run.max_parallel_workers}",
         "- Public CV strategy: stratified on quantile buckets of the row-wise mean selected target score.",
         f"- CV seed repeats: {resolved_run.cv_seed_repeat_count} (enabled={resolved_run.repeat_cv_with_new_seeds})",
-        f"- Nested hyperparameter sweep: {resolved_run.distillation_nested_sweep}",
-        f"- Distillation outer folds used: {config.reproduction.outer_cv.n_splits if resolved_run.distillation_nested_sweep else config.distillation_cv.n_splits}",
-        f"- Distillation inner folds used for sweep: {config.reproduction.inner_cv.n_splits if resolved_run.distillation_nested_sweep else 0}",
+        f"- Nested hyperparameter sweep requested: {resolved_run.distillation_nested_sweep}",
+        f"- Nested hyperparameter sweep effective: {nested_sweep_enabled}",
+        f"- Distillation outer folds used: {config.reproduction.outer_cv.n_splits if nested_sweep_enabled else config.distillation_cv.n_splits}",
+        f"- Distillation inner folds used for sweep: {config.reproduction.inner_cv.n_splits if nested_sweep_enabled else 0}",
         f"- Save reasoning prediction CSVs: {resolved_run.save_reasoning_predictions}",
         f"- OOF prediction columns written: {0 if combined_oof_predictions is None else len(combined_oof_predictions.columns) - 1}",
         f"- Held-out prediction columns written: {0 if combined_heldout_predictions is None else len(combined_heldout_predictions.columns) - 1}",
@@ -1125,7 +1140,61 @@ def run_pipeline(
     *,
     logger: Logger | None = None,
 ) -> Path:
+    def _publish_run_setup_summary_docs(*, run_dir: Path, mode_label: str) -> None:
+        docs_root = DOCS_DIR / "key-experiment-summaries"
+        docs_root.mkdir(parents=True, exist_ok=True)
+
+        lines: list[str] = [
+            "# Run Setup Summary",
+            "",
+            f"- Mode: `{mode_label}`",
+            f"- Source run dir: `{run_dir}`",
+            "",
+        ]
+
+        run_summary_path = run_dir / "run_summary.md"
+        if run_summary_path.exists():
+            lines.extend(
+                [
+                    "## Run Summary",
+                    "",
+                    run_summary_path.read_text(encoding="utf-8"),
+                    "",
+                ]
+            )
+
+        reasoning_summary_path = run_dir / "reasoning_metrics_summary.md"
+        if reasoning_summary_path.exists():
+            lines.extend(
+                [
+                    "## Reasoning Metrics",
+                    "",
+                    reasoning_summary_path.read_text(encoding="utf-8"),
+                    "",
+                ]
+            )
+
+        reproduction_summary_path = run_dir / "reproduction_summary.md"
+        if reproduction_summary_path.exists():
+            lines.extend(
+                [
+                    "## Reproduction Metrics",
+                    "",
+                    reproduction_summary_path.read_text(encoding="utf-8"),
+                    "",
+                ]
+            )
+
+        summary_text = "\n".join(lines).strip() + "\n"
+        write_markdown(docs_root / "run_setup_summary_latest.md", summary_text)
+        write_markdown(docs_root / f"run_setup_summary_{run_dir.name}.md", summary_text)
+
     overrides_use = overrides or RunOverrides()
+    thread_count = apply_global_thread_env()
+    _log(
+        logger,
+        f"Global compute settings: BLAS/OpenMP thread env vars set to {thread_count}.",
+    )
     if overrides_use.run_mode == "model_testing_mode":
         from src.pipeline.model_testing import run_model_testing_mode
 
@@ -1134,6 +1203,14 @@ def run_pipeline(
         from src.pipeline.xgb_calibration import run_xgb_calibration_mode
 
         return run_xgb_calibration_mode(config, overrides_use, logger=logger)
+    if overrides_use.run_mode == "rf_calibration_mode":
+        from src.pipeline.rf_calibration import run_rf_calibration_mode
+
+        return run_rf_calibration_mode(config, overrides_use, logger=logger)
+    if overrides_use.run_mode == "mlp_calibration_mode":
+        from src.pipeline.mlp_calibration import run_mlp_calibration_mode
+
+        return run_mlp_calibration_mode(config, overrides_use, logger=logger)
 
     if (
         (overrides_use.run_mode == "reasoning_distillation_mode")
@@ -1143,6 +1220,24 @@ def run_pipeline(
         child_runs: list[dict[str, str]] = []
         for family_id in ("v25_policies", "taste_policies"):
             child_overrides = replace(overrides_use, target_family=family_id)
+            if child_overrides.reasoning_models is not None:
+                target_family_spec = next(spec for spec in config.target_families if spec.family_id == family_id)
+                compatible_model_ids = {
+                    spec.model_id
+                    for spec in config.distillation_models
+                    if target_family_spec.task_kind in set(spec.supported_task_kinds)
+                }
+                filtered = [
+                    model_id
+                    for model_id in child_overrides.reasoning_models
+                    if model_id in compatible_model_ids
+                ]
+                if not filtered:
+                    raise RuntimeError(
+                        f"No compatible reasoning models selected for target family '{family_id}'. "
+                        f"Requested={child_overrides.reasoning_models}, compatible={sorted(compatible_model_ids)}"
+                    )
+                child_overrides = replace(child_overrides, reasoning_models=filtered)
             child_run_dir = run_reasoning_distillation_mode(config, child_overrides, logger=logger)
             child_runs.append({"target_family": family_id, "run_dir": str(child_run_dir)})
         write_json(run_dir / "child_runs.json", child_runs)
@@ -1155,17 +1250,32 @@ def run_pipeline(
         summary_lines.extend([f"  - `{item['target_family']}` -> `{item['run_dir']}`" for item in child_runs])
         write_markdown(run_dir / "run_summary.md", "\n".join(summary_lines))
         _log(logger, f"Multi-family distillation run complete. Artifacts written to {run_dir}.")
+        _publish_run_setup_summary_docs(
+            run_dir=run_dir,
+            mode_label="reasoning_distillation_mode (v25_and_taste)",
+        )
         return run_dir
 
     resolved = resolve_run_options(config, overrides)
     if resolved.run_mode == "reproduction_mode":
-        return run_reproduction_mode(
+        run_dir = run_reproduction_mode(
             config,
             use_nested_hyperparameter_cv=resolved.distillation_nested_sweep,
             max_parallel_workers=resolved.max_parallel_workers,
             logger=logger,
         )
-    return run_reasoning_distillation_mode(config, overrides, logger=logger)
+        _publish_run_setup_summary_docs(
+            run_dir=run_dir,
+            mode_label="reproduction_mode",
+        )
+        return run_dir
+
+    run_dir = run_reasoning_distillation_mode(config, overrides, logger=logger)
+    _publish_run_setup_summary_docs(
+        run_dir=run_dir,
+        mode_label="reasoning_distillation_mode",
+    )
+    return run_dir
 
 
 def run_reasoning_reconstruction(

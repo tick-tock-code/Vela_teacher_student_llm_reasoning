@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--run-mode",
-        choices=["reproduction_mode", "reasoning_distillation_mode", "model_testing_mode", "xgb_calibration_mode"],
+        choices=["reproduction_mode", "reasoning_distillation_mode", "model_testing_mode", "xgb_calibration_mode", "rf_calibration_mode", "mlp_calibration_mode"],
         help="Pipeline mode. Defaults to the config default.",
     )
     parser.add_argument(
@@ -106,6 +106,66 @@ def build_parser() -> argparse.ArgumentParser:
         help="In model_testing_mode, load latest xgb calibration and override xgb n_estimators.",
     )
     parser.add_argument(
+        "--rf-calibration-min-samples-leaf",
+        nargs="*",
+        type=int,
+        help="Sweep values for min_samples_leaf in rf_calibration_mode.",
+    )
+    parser.add_argument(
+        "--rf-calibration-max-depth",
+        nargs="*",
+        type=str,
+        help="Sweep values for max_depth in rf_calibration_mode; use 'none' for unbounded depth.",
+    )
+    parser.add_argument(
+        "--rf-calibration-max-features",
+        nargs="*",
+        type=str,
+        help="Sweep values for max_features in rf_calibration_mode (e.g. sqrt 0.5).",
+    )
+    parser.add_argument(
+        "--use-latest-rf-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="In model_testing_mode, load latest rf calibration and override rf hyperparameters.",
+    )
+    parser.add_argument(
+        "--mlp-calibration-hidden-layer-sizes",
+        nargs="*",
+        type=str,
+        help="Sweep hidden layer sizes for mlp_calibration_mode, e.g. 8 16 32 16,8",
+    )
+    parser.add_argument(
+        "--mlp-calibration-alpha",
+        nargs="*",
+        type=float,
+        help="Sweep alpha values for mlp_calibration_mode.",
+    )
+    parser.add_argument(
+        "--use-latest-mlp-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="In model_testing_mode, load latest mlp calibration and override mlp hyperparameters.",
+    )
+    parser.add_argument(
+        "--mlp-hidden-layer-sizes",
+        type=str,
+        help=(
+            "Direct fixed MLP hidden layer sizes for reasoning/model-testing runs, "
+            "for example '32' or '16,8'."
+        ),
+    )
+    parser.add_argument(
+        "--mlp-alpha",
+        type=float,
+        help="Direct fixed MLP alpha for reasoning/model-testing runs.",
+    )
+    parser.add_argument(
+        "--model-testing-per-fit-threads",
+        type=int,
+        help="Per-fit BLAS/OpenMP thread count used inside model_testing_mode (default 1).",
+    )
+    parser.add_argument(
         "--max-parallel-workers",
         type=int,
         help="Maximum worker threads for parallel model training (default auto: min(7, cpu_count-1)).",
@@ -122,6 +182,47 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
     args = build_parser().parse_args(argv)
+    rf_max_depth_values = None
+    if args.rf_calibration_max_depth:
+        rf_max_depth_values = []
+        for raw in args.rf_calibration_max_depth:
+            token = str(raw).strip().lower()
+            if token in {"none", "null"}:
+                rf_max_depth_values.append(None)
+            else:
+                rf_max_depth_values.append(int(token))
+
+    rf_max_features_values = None
+    if args.rf_calibration_max_features:
+        rf_max_features_values = []
+        for raw in args.rf_calibration_max_features:
+            token = str(raw).strip()
+            try:
+                rf_max_features_values.append(float(token))
+            except ValueError:
+                rf_max_features_values.append(token)
+
+    mlp_hidden_sizes = None
+    if args.mlp_calibration_hidden_layer_sizes:
+        mlp_hidden_sizes = []
+        for raw in args.mlp_calibration_hidden_layer_sizes:
+            token = str(raw).strip()
+            if not token:
+                continue
+            if "," in token:
+                mlp_hidden_sizes.append([int(v.strip()) for v in token.split(",") if v.strip()])
+            else:
+                mlp_hidden_sizes.append([int(token)])
+
+    mlp_hidden_layer_sizes_override = None
+    if args.mlp_hidden_layer_sizes:
+        token = str(args.mlp_hidden_layer_sizes).strip()
+        if token:
+            if "," in token:
+                mlp_hidden_layer_sizes_override = [int(v.strip()) for v in token.split(",") if v.strip()]
+            else:
+                mlp_hidden_layer_sizes_override = [int(token)]
+
     return RunOverrides(
         config_path=args.config,
         run_mode=str(args.run_mode) if args.run_mode else None,
@@ -165,6 +266,24 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
             else None
         ),
         use_latest_xgb_calibration=args.use_latest_xgb_calibration,
+        rf_calibration_min_samples_leaf=(
+            [int(item) for item in args.rf_calibration_min_samples_leaf]
+            if args.rf_calibration_min_samples_leaf
+            else None
+        ),
+        rf_calibration_max_depth=rf_max_depth_values,
+        rf_calibration_max_features=rf_max_features_values,
+        use_latest_rf_calibration=args.use_latest_rf_calibration,
+        mlp_calibration_hidden_layer_sizes=mlp_hidden_sizes,
+        mlp_calibration_alpha=(
+            [float(item) for item in args.mlp_calibration_alpha]
+            if args.mlp_calibration_alpha
+            else None
+        ),
+        use_latest_mlp_calibration=args.use_latest_mlp_calibration,
+        mlp_hidden_layer_sizes=mlp_hidden_layer_sizes_override,
+        mlp_alpha=args.mlp_alpha,
+        model_testing_per_fit_threads=args.model_testing_per_fit_threads,
         max_parallel_workers=args.max_parallel_workers,
     )
 

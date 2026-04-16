@@ -35,6 +35,14 @@ MODEL_FAMILY_TO_MODEL_ID: dict[str, dict[str, str]] = {
     },
 }
 
+DEFAULT_MODEL_FAMILY_OUTPUT_MODES: dict[str, list[str]] = {
+    "linear_l2": ["single_target"],
+    "xgb1": ["single_target"],
+    "mlp": ["multi_output"],
+    "elasticnet": ["single_target"],
+    "randomforest": ["single_target"],
+}
+
 
 @dataclass(frozen=True)
 class RunOverrides:
@@ -53,10 +61,22 @@ class RunOverrides:
     candidate_feature_sets: list[str] | None = None
     model_families: list[str] | None = None
     output_modes: list[str] | None = None
+    model_family_output_modes: dict[str, list[str]] | None = None
     run_advanced_models: bool | None = None
     xgb_calibration_estimators: list[int] | None = None
     use_latest_xgb_calibration: bool | None = None
-    xgb_model_param_overrides_by_model_id: dict[str, dict[str, float | int]] | None = None
+    rf_calibration_min_samples_leaf: list[int] | None = None
+    rf_calibration_max_depth: list[int | None] | None = None
+    rf_calibration_max_features: list[str | float] | None = None
+    use_latest_rf_calibration: bool | None = None
+    mlp_calibration_hidden_layer_sizes: list[list[int]] | None = None
+    mlp_calibration_alpha: list[float] | None = None
+    use_latest_mlp_calibration: bool | None = None
+    mlp_hidden_layer_sizes: list[int] | None = None
+    mlp_alpha: float | None = None
+    xgb_model_param_overrides_by_model_id: dict[str, dict[str, object]] | None = None
+    rf_model_param_overrides_by_model_id: dict[str, dict[str, object]] | None = None
+    model_testing_per_fit_threads: int | None = None
     max_parallel_workers: int | None = None
 
 
@@ -79,10 +99,21 @@ class ResolvedRunOptions:
     candidate_feature_sets: list[str]
     model_families: list[str]
     output_modes: list[str]
+    model_family_output_modes: dict[str, list[str]]
     run_advanced_models: bool
     xgb_calibration_estimators: list[int]
     use_latest_xgb_calibration: bool
-    xgb_model_param_overrides_by_model_id: dict[str, dict[str, float | int]]
+    rf_calibration_min_samples_leaf: list[int]
+    rf_calibration_max_depth: list[int | None]
+    rf_calibration_max_features: list[str | float]
+    use_latest_rf_calibration: bool
+    mlp_calibration_hidden_layer_sizes: list[list[int]]
+    mlp_calibration_alpha: list[float]
+    use_latest_mlp_calibration: bool
+    mlp_hidden_layer_sizes: list[int] | None
+    mlp_alpha: float | None
+    xgb_model_param_overrides_by_model_id: dict[str, dict[str, object]]
+    rf_model_param_overrides_by_model_id: dict[str, dict[str, object]]
     max_parallel_workers: int
 
 
@@ -105,7 +136,7 @@ def _feature_set_requested_ids(
 ) -> list[str]:
     if overrides.candidate_feature_sets is not None:
         return [value for value in overrides.candidate_feature_sets]
-    if run_mode in {"model_testing_mode", "xgb_calibration_mode"}:
+    if run_mode in {"model_testing_mode", "xgb_calibration_mode", "rf_calibration_mode", "mlp_calibration_mode"}:
         return list(config.model_testing.candidate_feature_sets)
     return [spec.feature_set_id for spec in config.distillation_feature_sets]
 
@@ -120,7 +151,7 @@ def _resolve_requested_feature_banks(
 ) -> list[str]:
     if overrides.active_feature_banks is not None:
         return [value for value in overrides.active_feature_banks]
-    if run_mode not in {"model_testing_mode", "xgb_calibration_mode"}:
+    if run_mode not in {"model_testing_mode", "xgb_calibration_mode", "rf_calibration_mode", "mlp_calibration_mode"}:
         return sorted(available_feature_bank_ids)
 
     feature_set_map = {spec.feature_set_id: spec for spec in config.distillation_feature_sets}
@@ -138,6 +169,10 @@ def _resolve_model_families(
 ) -> list[str]:
     if run_mode == "xgb_calibration_mode":
         return ["xgb1"]
+    if run_mode == "rf_calibration_mode":
+        return ["randomforest"]
+    if run_mode == "mlp_calibration_mode":
+        return ["mlp"]
     if run_mode != "model_testing_mode":
         return []
     requested = (
@@ -160,7 +195,7 @@ def _resolve_output_modes(
     overrides: RunOverrides,
     run_mode: str,
 ) -> list[str]:
-    if run_mode == "xgb_calibration_mode":
+    if run_mode in {"xgb_calibration_mode", "rf_calibration_mode", "mlp_calibration_mode"}:
         return ["single_target"]
     requested = list(overrides.output_modes) if overrides.output_modes is not None else ["single_target"]
     _require_known_subset(
@@ -175,6 +210,63 @@ def _resolve_output_modes(
             "Only one output mode is supported outside model_testing_mode."
         )
     return requested
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        output.append(value)
+    return output
+
+
+def _resolve_model_family_output_modes(
+    *,
+    overrides: RunOverrides,
+    run_mode: str,
+    model_families: list[str],
+) -> dict[str, list[str]]:
+    if run_mode != "model_testing_mode":
+        return {}
+
+    unknown_keys: list[str] = []
+    if overrides.model_family_output_modes is not None:
+        unknown_keys = [
+            key for key in overrides.model_family_output_modes.keys()
+            if key not in set(model_families)
+        ]
+    if unknown_keys:
+        raise RuntimeError(
+            f"model_family_output_modes references unknown or unselected model families: {unknown_keys}"
+        )
+
+    mapping: dict[str, list[str]] = {}
+    for family_id in model_families:
+        if overrides.model_family_output_modes is not None:
+            requested_modes = list(
+                overrides.model_family_output_modes.get(
+                    family_id,
+                    DEFAULT_MODEL_FAMILY_OUTPUT_MODES.get(family_id, ["single_target"]),
+                )
+            )
+        elif overrides.output_modes is not None:
+            requested_modes = list(overrides.output_modes)
+        else:
+            requested_modes = list(DEFAULT_MODEL_FAMILY_OUTPUT_MODES.get(family_id, ["single_target"]))
+
+        requested_modes = _dedupe_preserve_order(requested_modes)
+        _require_known_subset(
+            requested_modes,
+            available=SUPPORTED_OUTPUT_MODES,
+            label=f"output modes for model family '{family_id}'",
+        )
+        if not requested_modes:
+            raise RuntimeError(f"Model family '{family_id}' must have at least one output mode selected.")
+        mapping[family_id] = requested_modes
+    return mapping
 
 
 def _resolve_distillation_models(
@@ -220,6 +312,26 @@ def _resolve_distillation_models(
                 "xgb_calibration_mode requested model ids that are not configured in distillation_models: "
                 f"{missing}"
             )
+    elif run_mode == "rf_calibration_mode":
+        requested_ids = [
+            "randomforest_regressor" if target_family.task_kind == "regression" else "randomforest_classifier"
+        ]
+        missing = [model_id for model_id in requested_ids if model_id not in available_ids]
+        if missing:
+            raise RuntimeError(
+                "rf_calibration_mode requested model ids that are not configured in distillation_models: "
+                f"{missing}"
+            )
+    elif run_mode == "mlp_calibration_mode":
+        requested_ids = [
+            "mlp_regressor" if target_family.task_kind == "regression" else "mlp_classifier"
+        ]
+        missing = [model_id for model_id in requested_ids if model_id not in available_ids]
+        if missing:
+            raise RuntimeError(
+                "mlp_calibration_mode requested model ids that are not configured in distillation_models: "
+                f"{missing}"
+            )
     else:
         model_map = MODEL_FAMILY_TO_MODEL_ID[target_family.task_kind]
         requested_ids = [model_map[family] for family in model_families]
@@ -245,7 +357,7 @@ def resolve_run_options(
     overrides_use = overrides or RunOverrides()
 
     run_mode = overrides_use.run_mode or config.defaults.run_mode
-    if run_mode not in {"reproduction_mode", "reasoning_distillation_mode", "model_testing_mode", "xgb_calibration_mode"}:
+    if run_mode not in {"reproduction_mode", "reasoning_distillation_mode", "model_testing_mode", "xgb_calibration_mode", "rf_calibration_mode", "mlp_calibration_mode"}:
         raise RuntimeError(f"Unsupported run_mode '{run_mode}'.")
 
     target_family_id = overrides_use.target_family or config.defaults.target_family
@@ -267,6 +379,10 @@ def resolve_run_options(
     if run_mode == "model_testing_mode":
         heldout_evaluation = False
     if run_mode == "xgb_calibration_mode":
+        heldout_evaluation = False
+    if run_mode == "rf_calibration_mode":
+        heldout_evaluation = False
+    if run_mode == "mlp_calibration_mode":
         heldout_evaluation = False
 
     available_repository_banks = [spec for spec in config.repository_feature_banks if spec.enabled]
@@ -343,10 +459,6 @@ def resolve_run_options(
         overrides=overrides_use,
         run_mode=run_mode,
     )
-    output_modes = _resolve_output_modes(
-        overrides=overrides_use,
-        run_mode=run_mode,
-    )
     selected_models = _resolve_distillation_models(
         run_mode=run_mode,
         target_family=target_family,
@@ -354,6 +466,31 @@ def resolve_run_options(
         overrides=overrides_use,
         model_families=model_families,
     )
+    model_family_output_modes = _resolve_model_family_output_modes(
+        overrides=overrides_use,
+        run_mode=run_mode,
+        model_families=model_families,
+    )
+    if run_mode == "model_testing_mode":
+        output_modes = _dedupe_preserve_order(
+            [
+                mode
+                for family_id in model_families
+                for mode in model_family_output_modes.get(family_id, [])
+            ]
+        )
+        if not output_modes:
+            raise RuntimeError("At least one output mode must be active across selected model families.")
+    else:
+        output_modes = _resolve_output_modes(
+            overrides=overrides_use,
+            run_mode=run_mode,
+        )
+        if run_mode == "reasoning_distillation_mode" and overrides_use.output_modes is None:
+            selected_model_ids = {spec.model_id for spec in selected_models}
+            mlp_model_ids = {"mlp_regressor", "mlp_classifier"}
+            if selected_model_ids and selected_model_ids.issubset(mlp_model_ids):
+                output_modes = ["multi_output"]
 
     if run_mode == "reasoning_distillation_mode":
         if target_family.family_id == "v25_policies" and "policy_v25" in selected_feature_bank_ids:
@@ -385,7 +522,7 @@ def resolve_run_options(
         if overrides_use.run_advanced_models is None
         else bool(overrides_use.run_advanced_models)
     )
-    if run_mode == "xgb_calibration_mode":
+    if run_mode in {"xgb_calibration_mode", "rf_calibration_mode", "mlp_calibration_mode"}:
         run_advanced_models = False
 
     xgb_calibration_estimators = (
@@ -404,6 +541,80 @@ def resolve_run_options(
     if run_mode == "xgb_calibration_mode":
         use_latest_xgb_calibration = False
 
+    rf_calibration_min_samples_leaf = (
+        [int(value) for value in overrides_use.rf_calibration_min_samples_leaf]
+        if overrides_use.rf_calibration_min_samples_leaf is not None
+        else list(config.model_testing.rf_calibration_min_samples_leaf)
+    )
+    if not rf_calibration_min_samples_leaf or any(value <= 0 for value in rf_calibration_min_samples_leaf):
+        raise RuntimeError("rf calibration min_samples_leaf must be a non-empty list of positive integers.")
+
+    rf_calibration_max_depth = (
+        [value for value in overrides_use.rf_calibration_max_depth]
+        if overrides_use.rf_calibration_max_depth is not None
+        else list(config.model_testing.rf_calibration_max_depth)
+    )
+    if not rf_calibration_max_depth:
+        raise RuntimeError("rf calibration max_depth must be a non-empty list.")
+
+    rf_calibration_max_features = (
+        [value for value in overrides_use.rf_calibration_max_features]
+        if overrides_use.rf_calibration_max_features is not None
+        else list(config.model_testing.rf_calibration_max_features)
+    )
+    if not rf_calibration_max_features:
+        raise RuntimeError("rf calibration max_features must be a non-empty list.")
+
+    use_latest_rf_calibration = (
+        config.model_testing.use_latest_rf_calibration_default
+        if overrides_use.use_latest_rf_calibration is None
+        else bool(overrides_use.use_latest_rf_calibration)
+    )
+    if run_mode == "rf_calibration_mode":
+        use_latest_rf_calibration = False
+
+    mlp_calibration_hidden_layer_sizes = (
+        [
+            [int(v) for v in layer]
+            for layer in overrides_use.mlp_calibration_hidden_layer_sizes
+        ]
+        if getattr(overrides_use, "mlp_calibration_hidden_layer_sizes", None) is not None
+        else [list(layer) for layer in config.model_testing.mlp_calibration_hidden_layer_sizes]
+    )
+    if not mlp_calibration_hidden_layer_sizes:
+        raise RuntimeError("mlp calibration hidden_layer_sizes must be a non-empty list.")
+    mlp_calibration_alpha = (
+        [float(value) for value in overrides_use.mlp_calibration_alpha]
+        if getattr(overrides_use, "mlp_calibration_alpha", None) is not None
+        else list(config.model_testing.mlp_calibration_alpha)
+    )
+    if not mlp_calibration_alpha or any(value <= 0 for value in mlp_calibration_alpha):
+        raise RuntimeError("mlp calibration alpha must be a non-empty list of > 0 values.")
+    use_latest_mlp_calibration = (
+        config.model_testing.use_latest_mlp_calibration_default
+        if getattr(overrides_use, "use_latest_mlp_calibration", None) is None
+        else bool(overrides_use.use_latest_mlp_calibration)
+    )
+    if run_mode == "mlp_calibration_mode":
+        use_latest_mlp_calibration = False
+
+    mlp_hidden_layer_sizes = (
+        [int(value) for value in overrides_use.mlp_hidden_layer_sizes]
+        if overrides_use.mlp_hidden_layer_sizes is not None
+        else None
+    )
+    if mlp_hidden_layer_sizes is not None:
+        if not mlp_hidden_layer_sizes or any(value <= 0 for value in mlp_hidden_layer_sizes):
+            raise RuntimeError("mlp_hidden_layer_sizes must be a non-empty list of positive integers.")
+
+    mlp_alpha = (
+        float(overrides_use.mlp_alpha)
+        if overrides_use.mlp_alpha is not None
+        else None
+    )
+    if mlp_alpha is not None and mlp_alpha <= 0:
+        raise RuntimeError("mlp_alpha must be > 0 when provided.")
+
     return ResolvedRunOptions(
         config_path=overrides_use.config_path,
         run_mode=run_mode,
@@ -418,7 +629,7 @@ def resolve_run_options(
         repeat_cv_with_new_seeds=repeat_cv_with_new_seeds,
         cv_seed_repeat_count=cv_seed_repeat_count,
         distillation_nested_sweep=(
-            True if overrides_use.distillation_nested_sweep is None else bool(overrides_use.distillation_nested_sweep)
+            False if overrides_use.distillation_nested_sweep is None else bool(overrides_use.distillation_nested_sweep)
         ),
         save_reasoning_predictions=(
             True if overrides_use.save_reasoning_predictions is None else bool(overrides_use.save_reasoning_predictions)
@@ -426,9 +637,20 @@ def resolve_run_options(
         candidate_feature_sets=[spec.feature_set_id for spec in selected_feature_sets],
         model_families=model_families,
         output_modes=output_modes,
+        model_family_output_modes=model_family_output_modes,
         run_advanced_models=run_advanced_models,
         xgb_calibration_estimators=xgb_calibration_estimators,
         use_latest_xgb_calibration=use_latest_xgb_calibration,
+        rf_calibration_min_samples_leaf=rf_calibration_min_samples_leaf,
+        rf_calibration_max_depth=rf_calibration_max_depth,
+        rf_calibration_max_features=rf_calibration_max_features,
+        use_latest_rf_calibration=use_latest_rf_calibration,
+        mlp_calibration_hidden_layer_sizes=mlp_calibration_hidden_layer_sizes,
+        mlp_calibration_alpha=mlp_calibration_alpha,
+        use_latest_mlp_calibration=use_latest_mlp_calibration,
+        mlp_hidden_layer_sizes=mlp_hidden_layer_sizes,
+        mlp_alpha=mlp_alpha,
         xgb_model_param_overrides_by_model_id=dict(overrides_use.xgb_model_param_overrides_by_model_id or {}),
+        rf_model_param_overrides_by_model_id=dict(overrides_use.rf_model_param_overrides_by_model_id or {}),
         max_parallel_workers=resolve_max_parallel_workers(overrides_use.max_parallel_workers),
     )

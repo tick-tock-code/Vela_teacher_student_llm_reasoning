@@ -33,7 +33,7 @@ def train_reasoning_regressors_oof(
     random_state: int,
     scale_min: float,
     scale_max: float,
-    model_param_overrides_by_model_id: dict[str, dict[str, float | int]] | None = None,
+    model_param_overrides_by_model_id: dict[str, dict[str, object]] | None = None,
     max_parallel_workers: int = 1,
 ) -> ReasoningCVOutputs:
     predictions = pd.DataFrame({"founder_uuid": founder_ids.astype(str).tolist()})
@@ -115,7 +115,7 @@ def fit_reasoning_regressors_full(
     target_columns: list[str],
     model_specs: list[DistillationModelSpec],
     random_state: int,
-    model_param_overrides_by_model_id: dict[str, dict[str, float | int]] | None = None,
+    model_param_overrides_by_model_id: dict[str, dict[str, object]] | None = None,
     max_parallel_workers: int = 1,
 ) -> dict[tuple[str, str], object]:
     X = feature_frame.to_numpy(dtype=float)
