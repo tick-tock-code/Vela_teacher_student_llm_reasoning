@@ -1,10 +1,3 @@
-# Run Setup Summary
-
-- Mode: `reasoning_distillation_mode`
-- Source run dir: `C:\Users\joelb\OneDrive\Vela_partnerships_project\Teacher_student_project\Vela_teacher_student_llm_reasoning\tmp\runs\teacher_student_distillation_v1\2026-04-16_035351_442324_reasoning_distillation`
-
-## Run Summary
-
 # Run Summary
 
 - Run mode: `reasoning_distillation_mode`
@@ -20,23 +13,9 @@
 - CV seed repeats: 1 (enabled=False)
 - Nested hyperparameter sweep requested: False
 - Nested hyperparameter sweep effective: False
-- Distillation outer folds used: 2
+- Distillation outer folds used: 3
 - Distillation inner folds used for sweep: 0
 - Save reasoning prediction CSVs: False
 - OOF prediction columns written: 16
 - Held-out prediction columns written: 0
 - Held-out evaluation was skipped because it was not requested.
-
-
-## Reasoning Metrics
-
-# Reasoning Metrics Summary
-
-- Target family: `v25_policies`
-- Task kind: `regression`
-
-## Public OOF (Averaged Across Targets)
-
-| feature_set_id | model_id | mean_r2 | mean_rmse | mean_mae | mean_pearson | mean_spearman |
-|---|---:|---:|---:|---:|---:|---:|
-| hq_plus_sentence_prose | mlp_regressor | 0.2875 | 0.2927 | 0.2006 | 0.5460 | 0.5267 |

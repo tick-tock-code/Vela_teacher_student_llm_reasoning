@@ -1,0 +1,536 @@
+{
+  "experiment_id": "teacher_student_distillation_v1",
+  "description": "Feature Repository integration with default benchmark reproduction mode and reasoning-distillation mode for v25 and Taste policy targets.",
+  "datasets": {
+    "public_train_csv": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\data\\VCBench_data\\vcbench_final_public.csv",
+    "private_test_csv": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\data\\VCBench_data\\vcbench_final_private (success column removed) - vcbench_final_private.csv"
+  },
+  "feature_repository": {
+    "root_dir": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository",
+    "labels_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\splits\\labels.csv",
+    "train_uuids_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\splits\\train_uuids.txt",
+    "test_uuids_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\splits\\test_uuids.txt"
+  },
+  "defaults": {
+    "run_mode": "reproduction_mode",
+    "target_family": "v25_policies",
+    "heldout_evaluation": false
+  },
+  "repository_feature_banks": [
+    {
+      "feature_bank_id": "hq_baseline",
+      "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\hq_baseline\\features_train.csv",
+      "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\hq_baseline\\features_test.csv",
+      "source_id_column": "founder_uuid",
+      "enabled": true,
+      "feature_prefixes": [],
+      "exclude_columns": [],
+      "label_column": "success",
+      "all_features_binary": false,
+      "binary_feature_columns": [
+        "has_prior_ipo",
+        "has_prior_acquisition",
+        "stem_flag",
+        "seniority_is_monotone",
+        "company_size_is_growing",
+        "industry_alignment",
+        "is_serial_founder"
+      ]
+    },
+    {
+      "feature_bank_id": "llm_engineering",
+      "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\llm_engineering\\features_train.csv",
+      "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\llm_engineering\\features_test.csv",
+      "source_id_column": "founder_uuid",
+      "enabled": true,
+      "feature_prefixes": [
+        "le_"
+      ],
+      "exclude_columns": [],
+      "label_column": null,
+      "all_features_binary": true,
+      "binary_feature_columns": []
+    },
+    {
+      "feature_bank_id": "lambda_policies",
+      "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\lambda_policies\\predictions_train.csv",
+      "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\lambda_policies\\predictions_test.csv",
+      "source_id_column": "founder_uuid",
+      "enabled": true,
+      "feature_prefixes": [
+        "lam_"
+      ],
+      "exclude_columns": [],
+      "label_column": null,
+      "all_features_binary": true,
+      "binary_feature_columns": []
+    },
+    {
+      "feature_bank_id": "policy_v25",
+      "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_train.csv",
+      "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_test.csv",
+      "source_id_column": "founder_uuid",
+      "enabled": false,
+      "feature_prefixes": [
+        "v25_"
+      ],
+      "exclude_columns": [],
+      "label_column": null,
+      "all_features_binary": false,
+      "binary_feature_columns": []
+    }
+  ],
+  "intermediary_features": [
+    {
+      "feature_bank_id": "sentence_prose",
+      "kind": "sentence_transformer_prose_v1",
+      "enabled": true,
+      "embedding_model_name": "sentence-transformers/all-MiniLM-L6-v2"
+    },
+    {
+      "feature_bank_id": "sentence_structured",
+      "kind": "sentence_transformer_structured_v1",
+      "enabled": true,
+      "embedding_model_name": "sentence-transformers/all-MiniLM-L6-v2"
+    }
+  ],
+  "distillation_feature_sets": [
+    {
+      "feature_set_id": "hq_baseline",
+      "feature_bank_ids": [
+        "hq_baseline"
+      ]
+    },
+    {
+      "feature_set_id": "llm_engineering",
+      "feature_bank_ids": [
+        "llm_engineering"
+      ]
+    },
+    {
+      "feature_set_id": "lambda_policies",
+      "feature_bank_ids": [
+        "lambda_policies"
+      ]
+    },
+    {
+      "feature_set_id": "sentence_prose",
+      "feature_bank_ids": [
+        "sentence_prose"
+      ]
+    },
+    {
+      "feature_set_id": "sentence_structured",
+      "feature_bank_ids": [
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "sentence_bundle",
+      "feature_bank_ids": [
+        "sentence_prose",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "hq_plus_sentence_prose",
+      "feature_bank_ids": [
+        "hq_baseline",
+        "sentence_prose"
+      ]
+    },
+    {
+      "feature_set_id": "hq_plus_sentence_structured",
+      "feature_bank_ids": [
+        "hq_baseline",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "hq_plus_sentence_bundle",
+      "feature_bank_ids": [
+        "hq_baseline",
+        "sentence_prose",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "llm_engineering_plus_sentence_prose",
+      "feature_bank_ids": [
+        "llm_engineering",
+        "sentence_prose"
+      ]
+    },
+    {
+      "feature_set_id": "llm_engineering_plus_sentence_structured",
+      "feature_bank_ids": [
+        "llm_engineering",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "llm_engineering_plus_sentence_bundle",
+      "feature_bank_ids": [
+        "llm_engineering",
+        "sentence_prose",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "lambda_policies_plus_sentence_prose",
+      "feature_bank_ids": [
+        "lambda_policies",
+        "sentence_prose"
+      ]
+    },
+    {
+      "feature_set_id": "lambda_policies_plus_sentence_structured",
+      "feature_bank_ids": [
+        "lambda_policies",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "lambda_policies_plus_sentence_bundle",
+      "feature_bank_ids": [
+        "lambda_policies",
+        "sentence_prose",
+        "sentence_structured"
+      ]
+    }
+  ],
+  "target_families": [
+    {
+      "family_id": "v25_policies",
+      "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_train.csv",
+      "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_test.csv",
+      "source_id_column": "founder_uuid",
+      "target_id_column": "founder_uuid",
+      "target_prefixes": [
+        "v25_"
+      ],
+      "task_kind": "regression",
+      "scale_min": 0.0,
+      "scale_max": 1.0,
+      "enabled_by_default": true
+    },
+    {
+      "family_id": "taste_policies",
+      "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_train.csv",
+      "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_test.csv",
+      "source_id_column": "founder_uuid",
+      "target_id_column": "founder_uuid",
+      "target_prefixes": [
+        "taste_"
+      ],
+      "task_kind": "classification",
+      "scale_min": null,
+      "scale_max": null,
+      "enabled_by_default": false
+    }
+  ],
+  "distillation_models": [
+    {
+      "model_id": "ridge",
+      "kind": "ridge",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    },
+    {
+      "model_id": "xgb1_regressor",
+      "kind": "xgb1_regressor",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    },
+    {
+      "model_id": "logreg_classifier",
+      "kind": "logreg_classifier",
+      "supported_task_kinds": [
+        "classification"
+      ]
+    },
+    {
+      "model_id": "xgb1_classifier",
+      "kind": "xgb1_classifier",
+      "supported_task_kinds": [
+        "classification"
+      ]
+    },
+    {
+      "model_id": "mlp_regressor",
+      "kind": "mlp_regressor",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    },
+    {
+      "model_id": "elasticnet_regressor",
+      "kind": "elasticnet_regressor",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    },
+    {
+      "model_id": "randomforest_regressor",
+      "kind": "randomforest_regressor",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    },
+    {
+      "model_id": "mlp_classifier",
+      "kind": "mlp_classifier",
+      "supported_task_kinds": [
+        "classification"
+      ]
+    },
+    {
+      "model_id": "elasticnet_logreg_classifier",
+      "kind": "elasticnet_logreg_classifier",
+      "supported_task_kinds": [
+        "classification"
+      ]
+    },
+    {
+      "model_id": "randomforest_classifier",
+      "kind": "randomforest_classifier",
+      "supported_task_kinds": [
+        "classification"
+      ]
+    }
+  ],
+  "reproduction": {
+    "outer_cv": {
+      "n_splits": 3,
+      "shuffle": true,
+      "random_state": 42
+    },
+    "inner_cv": {
+      "n_splits": 3,
+      "shuffle": true,
+      "random_state": 42
+    },
+    "threshold_grid": {
+      "start": 0.05,
+      "stop": 0.95,
+      "step": 0.01
+    },
+    "logistic_c_grid": [
+      0.0005,
+      0.001,
+      0.005,
+      0.01,
+      0.02,
+      0.05,
+      0.1,
+      0.2,
+      0.5,
+      1.0,
+      5.0
+    ],
+    "lambda_ranking": {
+      "c": 0.05,
+      "max_iter": 2000,
+      "solver": "liblinear",
+      "class_weight": "balanced",
+      "random_state": 42
+    },
+    "experiments": [
+      {
+        "experiment_id": "hq_only",
+        "title": "HQ only",
+        "feature_bank_ids": [
+          "hq_baseline"
+        ],
+        "training_pool": "full",
+        "model_kind": "xgb_joel_classifier",
+        "use_exit_override": true,
+        "lambda_top_k": null,
+        "lambda_rank_base_bank_id": null,
+        "standardize": false
+      },
+      {
+        "experiment_id": "llm_engineering_only",
+        "title": "LLM Engineering only",
+        "feature_bank_ids": [
+          "llm_engineering"
+        ],
+        "training_pool": "llm_engineering_non_seed",
+        "model_kind": "nested_l2_logreg",
+        "use_exit_override": false,
+        "lambda_top_k": null,
+        "lambda_rank_base_bank_id": null,
+        "standardize": true
+      },
+      {
+        "experiment_id": "policy_induction_only",
+        "title": "Policy Induction only (v25)",
+        "feature_bank_ids": [
+          "policy_v25"
+        ],
+        "training_pool": "full",
+        "model_kind": "nested_l2_logreg",
+        "use_exit_override": false,
+        "lambda_top_k": null,
+        "lambda_rank_base_bank_id": null,
+        "standardize": true
+      },
+      {
+        "experiment_id": "hq_plus_top30_lambda",
+        "title": "HQ + top-30 lambda policy",
+        "feature_bank_ids": [
+          "hq_baseline",
+          "lambda_policies"
+        ],
+        "training_pool": "full",
+        "model_kind": "xgb_autoresearch_classifier",
+        "use_exit_override": true,
+        "lambda_top_k": 30,
+        "lambda_rank_base_bank_id": "hq_baseline",
+        "standardize": false
+      },
+      {
+        "experiment_id": "hq_plus_top40_lambda",
+        "title": "HQ + top-40 lambda policy",
+        "feature_bank_ids": [
+          "hq_baseline",
+          "lambda_policies"
+        ],
+        "training_pool": "full",
+        "model_kind": "xgb_autoresearch_classifier",
+        "use_exit_override": true,
+        "lambda_top_k": 40,
+        "lambda_rank_base_bank_id": "hq_baseline",
+        "standardize": false
+      },
+      {
+        "experiment_id": "hq_plus_policy_induction",
+        "title": "HQ + Policy Induction (v25)",
+        "feature_bank_ids": [
+          "hq_baseline",
+          "policy_v25"
+        ],
+        "training_pool": "full",
+        "model_kind": "nested_l2_logreg",
+        "use_exit_override": true,
+        "lambda_top_k": null,
+        "lambda_rank_base_bank_id": null,
+        "standardize": true
+      },
+      {
+        "experiment_id": "llm_engineering_plus_top30_lambda",
+        "title": "LLM Engineering + top-30 lambda policy",
+        "feature_bank_ids": [
+          "llm_engineering",
+          "lambda_policies"
+        ],
+        "training_pool": "llm_engineering_non_seed",
+        "model_kind": "nested_l2_logreg",
+        "use_exit_override": false,
+        "lambda_top_k": 30,
+        "lambda_rank_base_bank_id": "llm_engineering",
+        "standardize": true
+      },
+      {
+        "experiment_id": "llm_engineering_plus_top40_lambda",
+        "title": "LLM Engineering + top-40 lambda policy",
+        "feature_bank_ids": [
+          "llm_engineering",
+          "lambda_policies"
+        ],
+        "training_pool": "llm_engineering_non_seed",
+        "model_kind": "nested_l2_logreg",
+        "use_exit_override": false,
+        "lambda_top_k": 40,
+        "lambda_rank_base_bank_id": "llm_engineering",
+        "standardize": true
+      },
+      {
+        "experiment_id": "llm_engineering_plus_policy_induction",
+        "title": "LLM Engineering + Policy Induction (v25)",
+        "feature_bank_ids": [
+          "llm_engineering",
+          "policy_v25"
+        ],
+        "training_pool": "llm_engineering_non_seed",
+        "model_kind": "nested_l2_logreg",
+        "use_exit_override": false,
+        "lambda_top_k": null,
+        "lambda_rank_base_bank_id": null,
+        "standardize": true
+      }
+    ]
+  },
+  "distillation_cv": {
+    "n_splits": 3,
+    "shuffle": true,
+    "random_state": 42
+  },
+  "model_testing": {
+    "candidate_feature_sets": [
+      "hq_plus_sentence_prose",
+      "llm_engineering_plus_sentence_prose",
+      "lambda_policies_plus_sentence_prose",
+      "sentence_prose"
+    ],
+    "default_model_families": [
+      "linear_l2",
+      "xgb1",
+      "mlp",
+      "randomforest"
+    ],
+    "run_advanced_models_default": false,
+    "screening_repeat_cv_count": 3,
+    "screening_score_delta": 0.005,
+    "max_recommended_feature_sets": 3,
+    "xgb_calibration_estimators": [
+      40,
+      80,
+      120,
+      180,
+      240,
+      320
+    ],
+    "use_latest_xgb_calibration_default": false,
+    "rf_calibration_min_samples_leaf": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "rf_calibration_max_depth": [
+      null,
+      10,
+      20,
+      30
+    ],
+    "rf_calibration_max_features": [
+      "sqrt",
+      0.5
+    ],
+    "use_latest_rf_calibration_default": false,
+    "mlp_calibration_hidden_layer_sizes": [
+      [
+        8
+      ],
+      [
+        16
+      ],
+      [
+        32
+      ],
+      [
+        16,
+        8
+      ]
+    ],
+    "mlp_calibration_alpha": [
+      0.001,
+      0.01,
+      0.1
+    ],
+    "use_latest_mlp_calibration_default": false
+  }
+}

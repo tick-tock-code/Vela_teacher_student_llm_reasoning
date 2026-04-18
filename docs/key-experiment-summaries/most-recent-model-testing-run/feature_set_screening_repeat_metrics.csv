@@ -1,0 +1,3 @@
+feature_set_id,model_id,output_mode,pearson,spearman,mae,rmse,r2,cv_seed_repeat_count,repeat_index,repeat_seed,target_family,stage,roc_auc,pr_auc,precision,recall,f0_5,brier,precision_at_01,precision_at_05,precision_at_10,threshold
+lambda_policies_plus_sentence_prose,xgb1_regressor,single_target,0.5902243029523111,0.5864016681403126,0.1995419428398955,0.28403510277584343,0.34154969869921303,1.0,0,42,v25_policies,screening,,,,,,,,,,
+lambda_policies_plus_sentence_prose,xgb1_classifier,single_target,,,,,,1.0,0,42,taste_policies,screening,0.924355777862384,0.7691280629826667,0.7851643952126245,0.6665549662048018,0.7533589698701287,0.1350402892541211,0.8633333333333333,0.7631111111111111,0.6985555555555555,0.7970000000000003

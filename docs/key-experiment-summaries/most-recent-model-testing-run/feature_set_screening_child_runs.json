@@ -1,0 +1,16 @@
+[
+  {
+    "target_family": "v25_policies",
+    "repeat_index": 0,
+    "repeat_seed": 42,
+    "run_dir": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\tmp\\runs\\teacher_student_distillation_v1\\2026-04-16_140748_076929_reasoning_distillation",
+    "output_mode": "single_target"
+  },
+  {
+    "target_family": "taste_policies",
+    "repeat_index": 0,
+    "repeat_seed": 42,
+    "run_dir": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\tmp\\runs\\teacher_student_distillation_v1\\2026-04-16_140836_152708_reasoning_distillation",
+    "output_mode": "single_target"
+  }
+]

@@ -31,6 +31,56 @@ from src.utils.paths import RUNS_DIR
 
 Logger = Callable[[str], None]
 HEARTBEAT_SECONDS = 30.0
+DEFAULT_MODEL_TESTING_MLP_TOL = 1e-3
+
+MODEL_ID_TO_ARCHITECTURE: dict[str, str] = {
+    "ridge": "linear_l2",
+    "logreg_classifier": "linear_l2",
+    "xgb1_regressor": "xgb1",
+    "xgb1_classifier": "xgb1",
+    "mlp_regressor": "mlp",
+    "mlp_classifier": "mlp",
+    "randomforest_regressor": "randomforest",
+    "randomforest_classifier": "randomforest",
+    "elasticnet_regressor": "elasticnet",
+    "elasticnet_logreg_classifier": "elasticnet",
+}
+ARCHITECTURE_LABELS: dict[str, str] = {
+    "linear_l2": "Linear L2",
+    "xgb1": "XGBoost",
+    "mlp": "MLP",
+    "randomforest": "Random Forest",
+    "elasticnet": "Elastic Net",
+}
+ARCHITECTURE_ORDER = ["linear_l2", "xgb1", "mlp", "randomforest", "elasticnet"]
+ARCHITECTURE_SORT_INDEX = {name: index for index, name in enumerate(ARCHITECTURE_ORDER)}
+
+
+def _model_architecture(model_id: str) -> str:
+    return MODEL_ID_TO_ARCHITECTURE.get(model_id, model_id)
+
+
+def _architecture_label(model_architecture: str) -> str:
+    return ARCHITECTURE_LABELS.get(model_architecture, model_architecture)
+
+
+def _architecture_sort_key(model_architecture: str) -> tuple[int, str]:
+    return (ARCHITECTURE_SORT_INDEX.get(model_architecture, 999), model_architecture)
+
+
+def _sorted_architectures(values: list[str]) -> list[str]:
+    unique = sorted({str(value) for value in values if str(value).strip()})
+    return sorted(unique, key=_architecture_sort_key)
+
+
+def _split_csv_tokens(values: pd.Series) -> list[str]:
+    tokens: set[str] = set()
+    for value in values.dropna().astype(str):
+        for token in value.split(","):
+            cleaned = token.strip()
+            if cleaned:
+                tokens.add(cleaned)
+    return sorted(tokens)
 
 
 def _parse_mlp_hidden_layer_sizes(value: object) -> tuple[int, ...]:
@@ -332,6 +382,7 @@ def _group_repeat_metrics(
         metrics_frame.groupby(["feature_set_id", "model_id", "output_mode"], as_index=False)
         .mean(numeric_only=True)
     )
+    grouped["model_architecture"] = grouped["model_id"].astype(str).map(_model_architecture)
     grouped["repeat_index"] = repeat_index
     grouped["repeat_seed"] = repeat_seed
     grouped["target_family"] = target_family
@@ -416,6 +467,110 @@ def _aggregate_screening_metrics(
     return output[columns].sort_values(["target_family", "output_mode", "rank"]).reset_index(drop=True)
 
 
+def _aggregate_screening_metrics_by_architecture(
+    repeat_model_metrics: pd.DataFrame,
+    *,
+    task_kind: str,
+    score_delta: float,
+    max_recommended: int,
+) -> pd.DataFrame:
+    if repeat_model_metrics.empty:
+        return pd.DataFrame()
+
+    metrics = repeat_model_metrics.copy()
+    metrics["model_architecture"] = metrics["model_id"].astype(str).map(_model_architecture)
+
+    for column in ("r2", "rmse", "mae", "f0_5", "roc_auc", "pr_auc"):
+        if column not in metrics.columns:
+            metrics[column] = float("nan")
+
+    primary_column = "r2" if task_kind == "regression" else "f0_5"
+
+    per_repeat_feature = (
+        metrics.groupby(
+            ["target_family", "output_mode", "model_architecture", "feature_set_id", "repeat_index"],
+            as_index=False,
+        )
+        .mean(numeric_only=True)
+    )
+    screening = (
+        per_repeat_feature.groupby(
+            ["target_family", "output_mode", "model_architecture", "feature_set_id"],
+            as_index=False,
+        )
+        .agg(
+            primary_mean=(primary_column, "mean"),
+            primary_std=(primary_column, "std"),
+            r2_mean=("r2", "mean"),
+            rmse_mean=("rmse", "mean"),
+            mae_mean=("mae", "mean"),
+            f0_5_mean=("f0_5", "mean"),
+            roc_auc_mean=("roc_auc", "mean"),
+            pr_auc_mean=("pr_auc", "mean"),
+        )
+    )
+    model_ids_by_architecture = (
+        metrics.groupby(["target_family", "output_mode", "model_architecture"], as_index=False)
+        .agg(model_ids=("model_id", lambda values: ", ".join(sorted({str(value) for value in values}))))
+    )
+    screening = screening.merge(
+        model_ids_by_architecture,
+        on=["target_family", "output_mode", "model_architecture"],
+        how="left",
+    )
+    screening["primary_std"] = screening["primary_std"].fillna(0.0)
+    screening["screen_score"] = screening["primary_mean"] - (0.5 * screening["primary_std"])
+    screening["primary_metric"] = primary_column
+    screening["recommended_take_forward"] = False
+    screening["rank"] = 0
+
+    output_rows: list[pd.DataFrame] = []
+    for _, architecture_frame in screening.groupby(
+        ["target_family", "output_mode", "model_architecture"],
+        sort=False,
+    ):
+        ranked = architecture_frame.sort_values("screen_score", ascending=False).reset_index(drop=True)
+        ranked["rank"] = ranked.index + 1
+        best_score = float(ranked.iloc[0]["screen_score"])
+        threshold = best_score - float(score_delta)
+        mask = ranked["screen_score"] >= threshold
+        recommended_indices = ranked.index[mask].tolist()
+        if not recommended_indices:
+            recommended_indices = [0]
+        recommended_indices = recommended_indices[:max_recommended]
+        ranked.loc[recommended_indices, "recommended_take_forward"] = True
+        output_rows.append(ranked)
+
+    output = pd.concat(output_rows, ignore_index=True)
+    columns = [
+        "target_family",
+        "output_mode",
+        "model_architecture",
+        "model_ids",
+        "feature_set_id",
+        "rank",
+        "primary_metric",
+        "primary_mean",
+        "primary_std",
+        "screen_score",
+        "recommended_take_forward",
+        "r2_mean",
+        "rmse_mean",
+        "mae_mean",
+        "f0_5_mean",
+        "roc_auc_mean",
+        "pr_auc_mean",
+    ]
+
+    output["architecture_sort_idx"] = (
+        output["model_architecture"].astype(str).map(ARCHITECTURE_SORT_INDEX).fillna(999).astype(int)
+    )
+    return output[columns + ["architecture_sort_idx"]].sort_values(
+        ["architecture_sort_idx", "target_family", "output_mode", "rank", "feature_set_id"],
+        ascending=[True, True, True, True, True],
+    ).drop(columns=["architecture_sort_idx"]).reset_index(drop=True)
+
+
 def _aggregate_model_results(
     repeat_model_metrics: pd.DataFrame,
     *,
@@ -442,10 +597,12 @@ def _aggregate_model_results(
     )
     grouped["primary_std"] = grouped["primary_std"].fillna(0.0)
     grouped["primary_metric"] = primary_column
+    grouped["model_architecture"] = grouped["model_id"].astype(str).map(_model_architecture)
     columns = [
         "target_family",
         "output_mode",
         "feature_set_id",
+        "model_architecture",
         "model_id",
         "primary_metric",
         "primary_mean",
@@ -457,14 +614,18 @@ def _aggregate_model_results(
         "roc_auc_mean",
         "pr_auc_mean",
     ]
-    return grouped[columns].sort_values(
-        ["target_family", "output_mode", "feature_set_id", "primary_mean"],
-        ascending=[True, True, True, False],
-    ).reset_index(drop=True)
+    grouped["architecture_sort_idx"] = (
+        grouped["model_architecture"].astype(str).map(ARCHITECTURE_SORT_INDEX).fillna(999).astype(int)
+    )
+    return grouped[columns + ["architecture_sort_idx"]].sort_values(
+        ["architecture_sort_idx", "target_family", "output_mode", "feature_set_id", "primary_mean"],
+        ascending=[True, True, True, True, False],
+    ).drop(columns=["architecture_sort_idx"]).reset_index(drop=True)
 
 
 def _render_screening_markdown(
-    screening: pd.DataFrame,
+    screening_overall: pd.DataFrame,
+    screening_by_architecture: pd.DataFrame,
     *,
     repeat_count: int,
     stage_a_model_families: list[str],
@@ -476,29 +637,92 @@ def _render_screening_markdown(
         "",
         f"- Repeats: {repeat_count}",
         f"- Stage A models: {', '.join(f'`{family}`' for family in stage_a_model_families)}",
+        "- Organization: grouped by model architecture, then target family/output mode.",
         "- Held-out features/targets: not used",
         f"- Recommendation rule: top score + any within `best - {score_delta}` (max {max_recommended}).",
         "",
     ]
-    if screening.empty:
+    if screening_overall.empty and screening_by_architecture.empty:
         lines.append("No screening results were produced.")
         return "\n".join(lines)
 
-    for (target_family, output_mode), frame in screening.groupby(["target_family", "output_mode"], sort=False):
-        lines.extend(
-            [
-                f"## {target_family} | {output_mode}",
-                "",
-                "| rank | feature_set_id | primary_mean | primary_std | screen_score | recommended |",
-                "|---:|---|---:|---:|---:|---:|",
+    if not screening_by_architecture.empty:
+        architecture_values = screening_by_architecture["model_architecture"].astype(str).tolist()
+        lines.extend(["## Architecture Coverage", ""])
+        lines.extend([
+            "| architecture | model_ids | target_families | output_modes |",
+            "|---|---|---|---|",
+        ])
+        for architecture in _sorted_architectures(architecture_values):
+            architecture_frame = screening_by_architecture[
+                screening_by_architecture["model_architecture"] == architecture
             ]
-        )
-        for row in frame.sort_values("rank").itertuples(index=False):
+            model_ids = ", ".join(_split_csv_tokens(architecture_frame["model_ids"]))
+            target_families = ", ".join(sorted({str(value) for value in architecture_frame["target_family"]}))
+            output_modes = ", ".join(sorted({str(value) for value in architecture_frame["output_mode"]}))
             lines.append(
-                f"| {row.rank} | {row.feature_set_id} | {row.primary_mean:.4f} | "
-                f"{row.primary_std:.4f} | {row.screen_score:.4f} | {bool(row.recommended_take_forward)} |"
+                f"| {_architecture_label(architecture)} | {model_ids} | {target_families} | {output_modes} |"
             )
         lines.append("")
+
+        lines.extend(["## Stage A Screening By Architecture", ""])
+        for architecture in _sorted_architectures(architecture_values):
+            architecture_frame = screening_by_architecture[
+                screening_by_architecture["model_architecture"] == architecture
+            ].copy()
+            architecture_frame = architecture_frame.sort_values(
+                ["target_family", "output_mode", "rank", "feature_set_id"],
+                ascending=[True, True, True, True],
+            )
+            model_ids = ", ".join(_split_csv_tokens(architecture_frame["model_ids"]))
+            lines.extend([
+                f"### {_architecture_label(architecture)}",
+                "",
+                f"- Model IDs: `{model_ids}`",
+                "",
+                "| target_family | output_mode | rank | feature_set_id | primary_mean | primary_std | screen_score | recommended |",
+                "|---|---|---:|---|---:|---:|---:|---:|",
+            ])
+            for row in architecture_frame.itertuples(index=False):
+                lines.append(
+                    f"| {row.target_family} | {row.output_mode} | {row.rank} | {row.feature_set_id} | "
+                    f"{row.primary_mean:.4f} | {row.primary_std:.4f} | {row.screen_score:.4f} | "
+                    f"{bool(row.recommended_take_forward)} |"
+                )
+            lines.append("")
+
+    if screening_overall.empty:
+        lines.append("Cross-architecture recommendation rows are not available.")
+        return "\n".join(lines)
+
+    recommended_rows = screening_overall[screening_overall["recommended_take_forward"]].copy()
+    lines.extend(["## Cross-Architecture Take-Forward Sets", ""])
+    if recommended_rows.empty:
+        lines.append("No feature sets were marked for take-forward.")
+        return "\n".join(lines)
+
+    recommendation_summary = (
+        recommended_rows.groupby(["target_family", "output_mode"], as_index=False)
+        .agg(
+            recommended_feature_sets=(
+                "feature_set_id",
+                lambda values: ", ".join(sorted({str(value) for value in values})),
+            )
+        )
+        .sort_values(["target_family", "output_mode"]) 
+    )
+    lines.extend([
+        "| target_family | output_mode | recommended_feature_sets |",
+        "|---|---|---|",
+    ])
+    for row in recommendation_summary.itertuples(index=False):
+        lines.append(
+            f"| {row.target_family} | {row.output_mode} | {row.recommended_feature_sets} |"
+        )
+    lines.append("")
+    lines.append(
+        "Take-forward sets above are selected using blended screening scores across enabled Stage A models for each target/output combination."
+    )
     return "\n".join(lines)
 
 
@@ -511,27 +735,57 @@ def _render_model_testing_markdown(
         "# Model Testing Report",
         "",
         f"- Repeats: {repeat_count}",
-        "- This report compares shortlisted feature sets by model family.",
+        "- This report compares shortlisted feature sets grouped by model architecture.",
         "",
     ]
     if results.empty:
         lines.append("Advanced model stage was skipped or produced no rows.")
         return "\n".join(lines)
 
-    for (target_family, output_mode, feature_set_id), frame in results.groupby(
-        ["target_family", "output_mode", "feature_set_id"], sort=False
-    ):
-        lines.extend(
-            [
-                f"## {target_family} | {output_mode} | {feature_set_id}",
-                "",
-                "| model_id | primary_mean | primary_std |",
-                "|---|---:|---:|",
-            ]
+    results_with_architecture = results.copy()
+    results_with_architecture["model_architecture"] = (
+        results_with_architecture["model_architecture"].astype(str)
+        if "model_architecture" in results_with_architecture.columns
+        else results_with_architecture["model_id"].astype(str).map(_model_architecture)
+    )
+    architecture_values = results_with_architecture["model_architecture"].astype(str).tolist()
+
+    lines.extend(["## Architecture Coverage", ""])
+    lines.extend([
+        "| architecture | model_ids | target_families | output_modes |",
+        "|---|---|---|---|",
+    ])
+    for architecture in _sorted_architectures(architecture_values):
+        architecture_frame = results_with_architecture[
+            results_with_architecture["model_architecture"] == architecture
+        ]
+        model_ids = ", ".join(sorted({str(value) for value in architecture_frame["model_id"]}))
+        target_families = ", ".join(sorted({str(value) for value in architecture_frame["target_family"]}))
+        output_modes = ", ".join(sorted({str(value) for value in architecture_frame["output_mode"]}))
+        lines.append(
+            f"| {_architecture_label(architecture)} | {model_ids} | {target_families} | {output_modes} |"
         )
-        for row in frame.sort_values("primary_mean", ascending=False).itertuples(index=False):
+    lines.append("")
+
+    lines.extend(["## Stage B Results By Architecture", ""])
+    for architecture in _sorted_architectures(architecture_values):
+        architecture_frame = results_with_architecture[
+            results_with_architecture["model_architecture"] == architecture
+        ].copy()
+        architecture_frame = architecture_frame.sort_values(
+            ["target_family", "output_mode", "primary_mean", "feature_set_id"],
+            ascending=[True, True, False, True],
+        )
+        lines.extend([
+            f"### {_architecture_label(architecture)}",
+            "",
+            "| target_family | output_mode | feature_set_id | model_id | primary_mean | primary_std |",
+            "|---|---|---|---|---:|---:|",
+        ])
+        for row in architecture_frame.itertuples(index=False):
             lines.append(
-                f"| {row.model_id} | {row.primary_mean:.4f} | {row.primary_std:.4f} |"
+                f"| {row.target_family} | {row.output_mode} | {row.feature_set_id} | {row.model_id} | "
+                f"{row.primary_mean:.4f} | {row.primary_std:.4f} |"
             )
         lines.append("")
     return "\n".join(lines)
@@ -1076,7 +1330,21 @@ def run_model_testing_mode(
         f"(families={family_sequence}, feature_sets={len(feature_set_ids)}, "
         f"repeats={repeat_count}, output_modes={output_modes}).",
     )
-    model_param_overrides_by_model_id: dict[str, dict[str, object]] = {}
+    model_param_overrides_by_model_id: dict[str, dict[str, object]] = {
+        model_id: dict(params)
+        for model_id, params in {
+            **resolved.xgb_model_param_overrides_by_model_id,
+            **resolved.rf_model_param_overrides_by_model_id,
+        }.items()
+    }
+    model_param_overrides_by_model_id.setdefault("mlp_regressor", {}).setdefault(
+        "tol",
+        DEFAULT_MODEL_TESTING_MLP_TOL,
+    )
+    model_param_overrides_by_model_id.setdefault("mlp_classifier", {}).setdefault(
+        "tol",
+        DEFAULT_MODEL_TESTING_MLP_TOL,
+    )
     latest_calibration: dict[str, object] | None = None
     latest_rf_calibration: dict[str, object] | None = None
     latest_mlp_calibration: dict[str, object] | None = None
@@ -1137,14 +1405,20 @@ def run_model_testing_mode(
                 if selected_n is not None:
                     xgb_model_id = "xgb1_regressor" if task_kind == "regression" else "xgb1_classifier"
                     if xgb_model_id in stage_a_model_ids:
-                        stage_model_overrides[xgb_model_id] = {"n_estimators": int(selected_n)}
+                        stage_model_overrides[xgb_model_id] = {
+                            **dict(stage_model_overrides.get(xgb_model_id, {})),
+                            "n_estimators": int(selected_n),
+                        }
             if latest_rf_calibration is not None:
                 selected_map = dict(latest_rf_calibration.get("selected_params_by_family", {}))
                 selected_params = selected_map.get(family_id)
                 if isinstance(selected_params, dict):
                     rf_model_id = "randomforest_regressor" if task_kind == "regression" else "randomforest_classifier"
                     if rf_model_id in stage_a_model_ids:
-                        stage_model_overrides[rf_model_id] = dict(selected_params)
+                        stage_model_overrides[rf_model_id] = {
+                            **dict(stage_model_overrides.get(rf_model_id, {})),
+                            **dict(selected_params),
+                        }
             if latest_mlp_calibration is not None:
                 selected_map = dict(latest_mlp_calibration.get("selected_params_by_family", {}))
                 selected_params = selected_map.get(family_id)
@@ -1152,6 +1426,7 @@ def run_model_testing_mode(
                     mlp_model_id = "mlp_regressor" if task_kind == "regression" else "mlp_classifier"
                     if mlp_model_id in stage_a_model_ids:
                         stage_model_overrides[mlp_model_id] = {
+                                **dict(stage_model_overrides.get(mlp_model_id, {})),
                             "hidden_layer_sizes": _parse_mlp_hidden_layer_sizes(
                                 selected_params.get("hidden_layer_sizes", "")
                             ),
@@ -1185,6 +1460,7 @@ def run_model_testing_mode(
     write_json(run_dir / "feature_set_screening_child_runs.json", stage_a_child_runs)
 
     screening_rows: list[pd.DataFrame] = []
+    screening_by_architecture_rows: list[pd.DataFrame] = []
     recommended_sets: dict[tuple[str, str], list[str]] = {}
     for family_id in family_sequence:
         for output_mode in output_modes:
@@ -1200,6 +1476,14 @@ def run_model_testing_mode(
                 max_recommended=config.model_testing.max_recommended_feature_sets,
             )
             screening_rows.append(screening_family)
+            screening_by_architecture_rows.append(
+                _aggregate_screening_metrics_by_architecture(
+                    family_metrics,
+                    task_kind=task_kind,
+                    score_delta=config.model_testing.screening_score_delta,
+                    max_recommended=config.model_testing.max_recommended_feature_sets,
+                )
+            )
             if screening_family.empty:
                 recommended_sets[(family_id, output_mode)] = []
                 continue
@@ -1214,11 +1498,18 @@ def run_model_testing_mode(
             )
 
     screening_frame = pd.concat(screening_rows, ignore_index=True) if screening_rows else pd.DataFrame()
+    screening_by_architecture_frame = (
+        pd.concat(screening_by_architecture_rows, ignore_index=True)
+        if screening_by_architecture_rows
+        else pd.DataFrame()
+    )
     write_csv(run_dir / "feature_set_screening.csv", screening_frame)
+    write_csv(run_dir / "feature_set_screening_by_architecture.csv", screening_by_architecture_frame)
     write_markdown(
         run_dir / "feature_set_screening_report.md",
         _render_screening_markdown(
             screening_frame,
+            screening_by_architecture_frame,
             repeat_count=repeat_count,
             stage_a_model_families=stage_a_model_families,
             score_delta=config.model_testing.screening_score_delta,
@@ -1267,14 +1558,20 @@ def run_model_testing_mode(
                     if selected_n is not None:
                         xgb_model_id = "xgb1_regressor" if task_kind == "regression" else "xgb1_classifier"
                         if xgb_model_id in model_ids:
-                            stage_model_overrides[xgb_model_id] = {"n_estimators": int(selected_n)}
+                            stage_model_overrides[xgb_model_id] = {
+                                **dict(stage_model_overrides.get(xgb_model_id, {})),
+                                "n_estimators": int(selected_n),
+                            }
                 if latest_rf_calibration is not None:
                     selected_map = dict(latest_rf_calibration.get("selected_params_by_family", {}))
                     selected_params = selected_map.get(family_id)
                     if isinstance(selected_params, dict):
                         rf_model_id = "randomforest_regressor" if task_kind == "regression" else "randomforest_classifier"
                         if rf_model_id in model_ids:
-                            stage_model_overrides[rf_model_id] = dict(selected_params)
+                            stage_model_overrides[rf_model_id] = {
+                                **dict(stage_model_overrides.get(rf_model_id, {})),
+                                **dict(selected_params),
+                            }
                 if latest_mlp_calibration is not None:
                     selected_map = dict(latest_mlp_calibration.get("selected_params_by_family", {}))
                     selected_params = selected_map.get(family_id)
@@ -1282,6 +1579,7 @@ def run_model_testing_mode(
                         mlp_model_id = "mlp_regressor" if task_kind == "regression" else "mlp_classifier"
                         if mlp_model_id in model_ids:
                             stage_model_overrides[mlp_model_id] = {
+                                **dict(stage_model_overrides.get(mlp_model_id, {})),
                                 "hidden_layer_sizes": _parse_mlp_hidden_layer_sizes(
                                     selected_params.get("hidden_layer_sizes", "")
                                 ),

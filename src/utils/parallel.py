@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 
 
-# Use all logical cores minus one by default unless explicitly overridden.
-DEFAULT_MAX_PARALLEL_WORKERS = None
+# Default to the benchmark-selected stable throughput settings unless explicitly overridden.
+DEFAULT_MAX_PARALLEL_WORKERS = 2
+DEFAULT_THREAD_COUNT = 1
 THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -19,9 +20,7 @@ def preferred_thread_count(requested: int | None = None) -> int:
         if requested < 1:
             raise RuntimeError("thread_count must be >= 1.")
         return int(requested)
-    cpu_count = os.cpu_count() or 1
-    # Reserve one logical core for OS responsiveness.
-    return max(1, cpu_count - 1)
+    return DEFAULT_THREAD_COUNT
 
 
 def apply_global_thread_env(thread_count: int | None = None) -> int:

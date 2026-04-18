@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -131,6 +133,427 @@ def _model_param_overrides_for(
     model_id: str,
 ) -> dict[str, object]:
     return dict((resolved_run.xgb_model_param_overrides_by_model_id or {}).get(model_id, {}))
+
+
+def _format_markdown_cell(value: object, *, float_precision: int = 6) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (float, np.floating)):
+        text = f"{float(value):.{float_precision}f}"
+    else:
+        text = str(value)
+    return text.replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _dataframe_to_markdown_lines(
+    frame: pd.DataFrame,
+    *,
+    max_rows: int | None = None,
+) -> list[str]:
+    if frame.empty:
+        return ["_No rows were produced for this artifact._"]
+
+    view = frame if max_rows is None else frame.head(max_rows)
+    headers = [str(column) for column in view.columns]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join("---" for _ in headers) + "|",
+    ]
+    for row in view.itertuples(index=False, name=None):
+        cells = [_format_markdown_cell(value) for value in row]
+        lines.append("| " + " | ".join(cells) + " |")
+
+    if max_rows is not None and len(frame) > max_rows:
+        lines.append("")
+        lines.append(f"_Showing first {max_rows} of {len(frame)} rows._")
+    return lines
+
+
+def _read_csv_or_empty(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def _copy_file_best_effort(src_path: Path, dst_path: Path) -> bool:
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(src_path, dst_path)
+        return True
+    except OSError:
+        try:
+            dst_path.write_bytes(src_path.read_bytes())
+            return True
+        except OSError:
+            return False
+
+
+DOCS_MODEL_ID_TO_ARCHITECTURE: dict[str, str] = {
+    "ridge": "linear_l2",
+    "logreg_classifier": "linear_l2",
+    "xgb1_regressor": "xgb1",
+    "xgb1_classifier": "xgb1",
+    "mlp_regressor": "mlp",
+    "mlp_classifier": "mlp",
+    "randomforest_regressor": "randomforest",
+    "randomforest_classifier": "randomforest",
+    "elasticnet_regressor": "elasticnet",
+    "elasticnet_logreg_classifier": "elasticnet",
+}
+DOCS_ARCHITECTURE_LABELS: dict[str, str] = {
+    "linear_l2": "Linear L2",
+    "xgb1": "XGBoost",
+    "mlp": "MLP",
+    "randomforest": "Random Forest",
+    "elasticnet": "Elastic Net",
+}
+DOCS_ARCHITECTURE_ORDER = ["linear_l2", "xgb1", "mlp", "randomforest", "elasticnet"]
+DOCS_ARCHITECTURE_SORT_INDEX = {name: index for index, name in enumerate(DOCS_ARCHITECTURE_ORDER)}
+
+
+def _docs_model_architecture(model_id: str) -> str:
+    return DOCS_MODEL_ID_TO_ARCHITECTURE.get(model_id, model_id)
+
+
+def _docs_architecture_label(model_architecture: str) -> str:
+    return DOCS_ARCHITECTURE_LABELS.get(model_architecture, model_architecture)
+
+
+def _docs_sorted_architectures(values: list[str]) -> list[str]:
+    unique = sorted({str(value) for value in values if str(value).strip()})
+    return sorted(unique, key=lambda value: (DOCS_ARCHITECTURE_SORT_INDEX.get(value, 999), value))
+
+
+def _join_unique_series(values: pd.Series) -> str:
+    return ", ".join(sorted({str(value).strip() for value in values.dropna().astype(str) if str(value).strip()}))
+
+
+def publish_model_testing_run_summary(run_dir: Path) -> Path:
+    docs_root = DOCS_DIR / "key-experiment-summaries"
+    docs_root.mkdir(parents=True, exist_ok=True)
+
+    latest_doc_path = docs_root / "most-recent-model-testing-run.md"
+    latest_artifacts_dir = docs_root / "most-recent-model-testing-run"
+
+    legacy_latest = docs_root / "model_testing_run_latest.md"
+    if legacy_latest.exists():
+        legacy_latest.unlink()
+    for legacy_timestamped in docs_root.glob("model_testing_run_*.md"):
+        if legacy_timestamped.is_file():
+            legacy_timestamped.unlink()
+
+    if latest_artifacts_dir.exists():
+        try:
+            shutil.rmtree(latest_artifacts_dir)
+        except OSError:
+            # Windows/OneDrive can briefly lock files; continue and overwrite what we can.
+            pass
+    latest_artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    copied_artifacts: list[str] = []
+    for src in sorted(run_dir.iterdir(), key=lambda path: path.name):
+        if not src.is_file():
+            continue
+        if src.suffix.lower() not in {".csv", ".json", ".md"}:
+            continue
+        if _copy_file_best_effort(src, latest_artifacts_dir / src.name):
+            copied_artifacts.append(src.name)
+
+    child_run_dirs: set[Path] = set()
+    for manifest_name in ("feature_set_screening_child_runs.json", "model_testing_child_runs.json"):
+        manifest_path = run_dir / manifest_name
+        if not manifest_path.exists() or manifest_path.stat().st_size == 0:
+            continue
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, list):
+            continue
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            child_dir_raw = str(item.get("run_dir", "")).strip()
+            if not child_dir_raw or child_dir_raw == "in_memory_multi_output":
+                continue
+            child_dir = Path(child_dir_raw)
+            if child_dir.exists() and child_dir.is_dir():
+                child_run_dirs.add(child_dir)
+
+    child_snapshot_root = latest_artifacts_dir / "child_runs"
+    copied_child_files = 0
+    for child_dir in sorted(child_run_dirs, key=lambda path: path.name):
+        child_out_dir = child_snapshot_root / child_dir.name
+        child_out_dir.mkdir(parents=True, exist_ok=True)
+        for artifact_name in (
+            "run_summary.md",
+            "reasoning_metrics_summary.md",
+            "reasoning_metrics.csv",
+            "reasoning_classification_thresholds.json",
+            "resolved_run_options.json",
+            "resolved_config.json",
+        ):
+            src_path = child_dir / artifact_name
+            if src_path.exists() and src_path.is_file():
+                if _copy_file_best_effort(src_path, child_out_dir / artifact_name):
+                    copied_child_files += 1
+
+    run_summary_path = run_dir / "run_summary.md"
+    screening_report_path = run_dir / "feature_set_screening_report.md"
+    model_testing_report_path = run_dir / "model_testing_report.md"
+
+    screening_frame = _read_csv_or_empty(run_dir / "feature_set_screening.csv")
+    screening_by_architecture_frame = _read_csv_or_empty(run_dir / "feature_set_screening_by_architecture.csv")
+    repeat_metrics_frame = _read_csv_or_empty(run_dir / "feature_set_screening_repeat_metrics.csv")
+    advanced_results_frame = _read_csv_or_empty(run_dir / "model_testing_results.csv")
+
+    if not repeat_metrics_frame.empty and "model_id" in repeat_metrics_frame.columns:
+        repeat_metrics_frame["model_architecture"] = (
+            repeat_metrics_frame.get("model_architecture", repeat_metrics_frame["model_id"])
+            .astype(str)
+            .map(_docs_model_architecture)
+        )
+
+    if not screening_by_architecture_frame.empty and "model_architecture" in screening_by_architecture_frame.columns:
+        screening_by_architecture_frame["model_architecture"] = (
+            screening_by_architecture_frame["model_architecture"].astype(str)
+        )
+
+    if not advanced_results_frame.empty and "model_id" in advanced_results_frame.columns:
+        advanced_results_frame["model_architecture"] = (
+            advanced_results_frame.get("model_architecture", advanced_results_frame["model_id"])
+            .astype(str)
+            .map(_docs_model_architecture)
+        )
+
+    screening_children_path = run_dir / "feature_set_screening_child_runs.json"
+    stage_b_children_path = run_dir / "model_testing_child_runs.json"
+
+    screening_children = pd.DataFrame()
+    if screening_children_path.exists() and screening_children_path.stat().st_size > 0:
+        try:
+            payload = json.loads(screening_children_path.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                screening_children = pd.DataFrame(payload)
+        except json.JSONDecodeError:
+            screening_children = pd.DataFrame()
+
+    stage_b_children = pd.DataFrame()
+    if stage_b_children_path.exists() and stage_b_children_path.stat().st_size > 0:
+        try:
+            payload = json.loads(stage_b_children_path.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                stage_b_children = pd.DataFrame(payload)
+        except json.JSONDecodeError:
+            stage_b_children = pd.DataFrame()
+
+    lines: list[str] = [
+        "# Most Recent Model Testing Run",
+        "",
+        "- Mode: `model_testing_mode`",
+        f"- Source run dir: `{run_dir}`",
+        f"- Docs artifacts dir: `{latest_artifacts_dir}`",
+        f"- Copied top-level artifacts: {len(copied_artifacts)}",
+        f"- Copied child-run artifact files: {copied_child_files}",
+        "",
+        "## Artifact Snapshot",
+        "",
+        f"- `feature_set_screening.csv` rows: {len(screening_frame)}",
+        f"- `feature_set_screening_by_architecture.csv` rows: {len(screening_by_architecture_frame)}",
+        f"- `feature_set_screening_repeat_metrics.csv` rows: {len(repeat_metrics_frame)}",
+        f"- `model_testing_results.csv` rows: {len(advanced_results_frame)}",
+        f"- `feature_set_screening_child_runs.json` rows: {len(screening_children)}",
+        f"- `model_testing_child_runs.json` rows: {len(stage_b_children)}",
+        "",
+    ]
+
+    if copied_artifacts:
+        lines.extend(["### Copied Top-Level Files", ""])
+        lines.extend([f"- `{artifact_name}`" for artifact_name in copied_artifacts])
+        lines.append("")
+
+    if run_summary_path.exists():
+        lines.extend(["## Run Summary", "", run_summary_path.read_text(encoding="utf-8").strip(), ""])
+
+    lines.extend(["## Report Files", ""])
+    if screening_report_path.exists():
+        lines.append("- `feature_set_screening_report.md`")
+    if model_testing_report_path.exists():
+        lines.append("- `model_testing_report.md`")
+    if not screening_report_path.exists() and not model_testing_report_path.exists():
+        lines.append("- No report markdown files were found in the run directory.")
+    lines.append("")
+
+    if not repeat_metrics_frame.empty and {
+        "model_architecture",
+        "model_id",
+        "target_family",
+        "output_mode",
+    }.issubset(repeat_metrics_frame.columns):
+        coverage_rows: list[dict[str, str]] = []
+        architecture_values = repeat_metrics_frame["model_architecture"].astype(str).tolist()
+        for architecture in _docs_sorted_architectures(architecture_values):
+            architecture_frame = repeat_metrics_frame[
+                repeat_metrics_frame["model_architecture"].astype(str) == architecture
+            ]
+            coverage_rows.append(
+                {
+                    "architecture": _docs_architecture_label(architecture),
+                    "model_ids": _join_unique_series(architecture_frame["model_id"]),
+                    "target_families": _join_unique_series(architecture_frame["target_family"]),
+                    "output_modes": _join_unique_series(architecture_frame["output_mode"]),
+                }
+            )
+        if coverage_rows:
+            lines.extend([
+                "## Stage A Architecture Coverage",
+                "",
+                *_dataframe_to_markdown_lines(pd.DataFrame(coverage_rows)),
+                "",
+            ])
+
+    if not screening_by_architecture_frame.empty and {
+        "model_architecture",
+        "target_family",
+        "output_mode",
+        "feature_set_id",
+        "rank",
+    }.issubset(screening_by_architecture_frame.columns):
+        best_by_architecture = screening_by_architecture_frame.copy()
+        best_by_architecture["rank_numeric"] = pd.to_numeric(best_by_architecture["rank"], errors="coerce")
+        best_by_architecture = best_by_architecture[best_by_architecture["rank_numeric"] == 1].copy()
+        if not best_by_architecture.empty:
+            best_by_architecture["architecture"] = (
+                best_by_architecture["model_architecture"].astype(str).map(_docs_architecture_label)
+            )
+            best_by_architecture["architecture_sort_idx"] = (
+                best_by_architecture["model_architecture"].astype(str)
+                .map(DOCS_ARCHITECTURE_SORT_INDEX)
+                .fillna(999)
+                .astype(int)
+            )
+            display_columns = [
+                "architecture",
+                "target_family",
+                "output_mode",
+                "model_ids",
+                "feature_set_id",
+                "primary_mean",
+                "primary_std",
+                "recommended_take_forward",
+            ]
+            display_frame = best_by_architecture.sort_values(
+                ["architecture_sort_idx", "target_family", "output_mode"],
+                ascending=[True, True, True],
+            )[display_columns].reset_index(drop=True)
+            lines.extend([
+                "## Stage A Best Feature Sets By Architecture",
+                "",
+                *_dataframe_to_markdown_lines(display_frame),
+                "",
+            ])
+
+    if not screening_frame.empty and {
+        "target_family",
+        "output_mode",
+        "feature_set_id",
+        "recommended_take_forward",
+    }.issubset(screening_frame.columns):
+        recommended = screening_frame[screening_frame["recommended_take_forward"] == True].copy()  # noqa: E712
+        if not recommended.empty:
+            recommended_summary = (
+                recommended.groupby(["target_family", "output_mode"], as_index=False)
+                .agg(recommended_feature_sets=("feature_set_id", _join_unique_series))
+                .sort_values(["target_family", "output_mode"], ascending=[True, True])
+            )
+            lines.extend([
+                "## Cross-Architecture Take-Forward Sets",
+                "",
+                *_dataframe_to_markdown_lines(recommended_summary),
+                "",
+            ])
+
+    lines.extend(["## Stage B Highlights", ""])
+    if advanced_results_frame.empty:
+        lines.append("Advanced model stage was skipped or produced no rows.")
+        lines.append("")
+    elif {
+        "model_architecture",
+        "target_family",
+        "output_mode",
+        "feature_set_id",
+        "model_id",
+        "primary_mean",
+        "primary_std",
+    }.issubset(advanced_results_frame.columns):
+        stage_b = advanced_results_frame.copy()
+        stage_b["primary_mean_numeric"] = pd.to_numeric(stage_b["primary_mean"], errors="coerce")
+        best_stage_b = (
+            stage_b.sort_values(
+                ["model_architecture", "target_family", "output_mode", "primary_mean_numeric"],
+                ascending=[True, True, True, False],
+            )
+            .drop_duplicates(["model_architecture", "target_family", "output_mode"])
+            .copy()
+        )
+        best_stage_b["architecture"] = best_stage_b["model_architecture"].astype(str).map(_docs_architecture_label)
+        best_stage_b["architecture_sort_idx"] = (
+            best_stage_b["model_architecture"].astype(str)
+            .map(DOCS_ARCHITECTURE_SORT_INDEX)
+            .fillna(999)
+            .astype(int)
+        )
+        stage_b_display = best_stage_b.sort_values(
+            ["architecture_sort_idx", "target_family", "output_mode"],
+            ascending=[True, True, True],
+        )[
+            [
+                "architecture",
+                "target_family",
+                "output_mode",
+                "feature_set_id",
+                "model_id",
+                "primary_mean",
+                "primary_std",
+            ]
+        ].reset_index(drop=True)
+        lines.extend([*_dataframe_to_markdown_lines(stage_b_display), ""])
+
+    lines.extend([
+        "## Data Appendix (Previews)",
+        "",
+        "### feature_set_screening_by_architecture.csv",
+        "",
+        *_dataframe_to_markdown_lines(screening_by_architecture_frame, max_rows=30),
+        "",
+        "### model_testing_results.csv",
+        "",
+        *_dataframe_to_markdown_lines(advanced_results_frame, max_rows=30),
+        "",
+        "### feature_set_screening_child_runs.json",
+        "",
+        *_dataframe_to_markdown_lines(screening_children, max_rows=12),
+        "",
+    ])
+
+    if not stage_b_children.empty:
+        lines.extend([
+            "### model_testing_child_runs.json",
+            "",
+            *_dataframe_to_markdown_lines(stage_b_children, max_rows=12),
+            "",
+        ])
+
+    write_markdown(latest_doc_path, "\n".join(lines).strip() + "\n")
+    return latest_doc_path
 
 
 def _render_reasoning_metrics_summary(
@@ -1140,12 +1563,18 @@ def run_pipeline(
     *,
     logger: Logger | None = None,
 ) -> Path:
-    def _publish_run_setup_summary_docs(*, run_dir: Path, mode_label: str) -> None:
+    def _publish_run_setup_summary_docs(
+        *,
+        run_dir: Path,
+        mode_label: str,
+        summary_title: str = "Run Setup Summary",
+        summary_basename: str = "run_setup_summary",
+    ) -> None:
         docs_root = DOCS_DIR / "key-experiment-summaries"
         docs_root.mkdir(parents=True, exist_ok=True)
 
         lines: list[str] = [
-            "# Run Setup Summary",
+            f"# {summary_title}",
             "",
             f"- Mode: `{mode_label}`",
             f"- Source run dir: `{run_dir}`",
@@ -1185,9 +1614,20 @@ def run_pipeline(
                 ]
             )
 
+        model_testing_report_path = run_dir / "model_testing_report.md"
+        if model_testing_report_path.exists():
+            lines.extend(
+                [
+                    "## Model Testing Report",
+                    "",
+                    model_testing_report_path.read_text(encoding="utf-8"),
+                    "",
+                ]
+            )
+
         summary_text = "\n".join(lines).strip() + "\n"
-        write_markdown(docs_root / "run_setup_summary_latest.md", summary_text)
-        write_markdown(docs_root / f"run_setup_summary_{run_dir.name}.md", summary_text)
+        write_markdown(docs_root / f"{summary_basename}_latest.md", summary_text)
+        write_markdown(docs_root / f"{summary_basename}_{run_dir.name}.md", summary_text)
 
     overrides_use = overrides or RunOverrides()
     thread_count = apply_global_thread_env()
@@ -1198,7 +1638,9 @@ def run_pipeline(
     if overrides_use.run_mode == "model_testing_mode":
         from src.pipeline.model_testing import run_model_testing_mode
 
-        return run_model_testing_mode(config, overrides_use, logger=logger)
+        run_dir = run_model_testing_mode(config, overrides_use, logger=logger)
+        publish_model_testing_run_summary(run_dir)
+        return run_dir
     if overrides_use.run_mode == "xgb_calibration_mode":
         from src.pipeline.xgb_calibration import run_xgb_calibration_mode
 
