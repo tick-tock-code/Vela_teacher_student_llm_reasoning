@@ -1,6 +1,7 @@
 # Model Testing Report
 
 - Repeats: 1
-- This report compares shortlisted feature sets by model family.
+- Stage B advanced comparisons are inactive in the current pipeline.
+- Use Saved Config Eval mode to run test-set evaluations from persisted Stage A bundles.
 
-Advanced model stage was skipped or produced no rows.
+No Stage B rows were produced because Stage B execution is inactive.

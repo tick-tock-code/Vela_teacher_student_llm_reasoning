@@ -7,4 +7,4 @@
 
 | feature_set_id | model_id | mean_r2 | mean_rmse | mean_mae | mean_pearson | mean_spearman |
 |---|---:|---:|---:|---:|---:|---:|
-| lambda_policies_plus_sentence_prose | xgb1_regressor | 0.3415 | 0.2840 | 0.1995 | 0.5902 | 0.5864 |
+| sentence_prose | ridge | 0.3411 | 0.2837 | 0.2011 | 0.5907 | 0.5867 |

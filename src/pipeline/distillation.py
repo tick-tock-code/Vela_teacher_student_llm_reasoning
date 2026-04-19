@@ -36,6 +36,14 @@ from src.student.reasoning_regression import (
     train_reasoning_regressors_oof,
 )
 from src.utils.artifact_io import timestamped_run_dir, write_csv, write_json, write_markdown
+from src.utils.model_ids import (
+    LEGACY_XGB_CLASSIFIER_MODEL_KIND,
+    LEGACY_XGB_REGRESSOR_MODEL_KIND,
+    XGB_CLASSIFIER_MODEL_KIND,
+    XGB_FAMILY_ID,
+    XGB_REGRESSOR_MODEL_KIND,
+    normalize_xgb_model_kind,
+)
 from src.utils.parallel import apply_global_thread_env, bounded_worker_count
 from src.utils.paths import DOCS_DIR, RUNS_DIR
 
@@ -199,8 +207,12 @@ def _copy_file_best_effort(src_path: Path, dst_path: Path) -> bool:
 DOCS_MODEL_ID_TO_ARCHITECTURE: dict[str, str] = {
     "ridge": "linear_l2",
     "logreg_classifier": "linear_l2",
-    "xgb1_regressor": "xgb1",
-    "xgb1_classifier": "xgb1",
+    "linear_svr_regressor": "linear_svm",
+    "linear_svm_classifier": "linear_svm",
+    LEGACY_XGB_REGRESSOR_MODEL_KIND: XGB_FAMILY_ID,
+    LEGACY_XGB_CLASSIFIER_MODEL_KIND: XGB_FAMILY_ID,
+    XGB_REGRESSOR_MODEL_KIND: XGB_FAMILY_ID,
+    XGB_CLASSIFIER_MODEL_KIND: XGB_FAMILY_ID,
     "mlp_regressor": "mlp",
     "mlp_classifier": "mlp",
     "randomforest_regressor": "randomforest",
@@ -210,12 +222,13 @@ DOCS_MODEL_ID_TO_ARCHITECTURE: dict[str, str] = {
 }
 DOCS_ARCHITECTURE_LABELS: dict[str, str] = {
     "linear_l2": "Linear L2",
-    "xgb1": "XGBoost",
+    "linear_svm": "Linear SVM",
+    XGB_FAMILY_ID: "XGBoost",
     "mlp": "MLP",
     "randomforest": "Random Forest",
     "elasticnet": "Elastic Net",
 }
-DOCS_ARCHITECTURE_ORDER = ["linear_l2", "xgb1", "mlp", "randomforest", "elasticnet"]
+DOCS_ARCHITECTURE_ORDER = ["linear_l2", "linear_svm", XGB_FAMILY_ID, "mlp", "randomforest", "elasticnet"]
 DOCS_ARCHITECTURE_SORT_INDEX = {name: index for index, name in enumerate(DOCS_ARCHITECTURE_ORDER)}
 
 
@@ -675,10 +688,11 @@ def _render_reasoning_metrics_summary(
 
 
 def _nested_param_grid(model_kind: str, task_kind: str) -> list[dict[str, float | int]]:
+    model_kind = normalize_xgb_model_kind(model_kind)
     if task_kind == "regression":
         if model_kind == "ridge":
             return [{"alpha": value} for value in (0.1, 1.0, 10.0, 50.0)]
-        if model_kind == "xgb1_regressor":
+        if model_kind == XGB_REGRESSOR_MODEL_KIND:
             grid: list[dict[str, float | int]] = []
             for n_estimators in (120, 227):
                 for learning_rate in (0.04, 0.0674):
@@ -694,7 +708,7 @@ def _nested_param_grid(model_kind: str, task_kind: str) -> list[dict[str, float 
     if task_kind == "classification":
         if model_kind == "logreg_classifier":
             return [{"C": value} for value in (0.05, 0.1, 0.5, 1.0, 5.0)]
-        if model_kind == "xgb1_classifier":
+        if model_kind == XGB_CLASSIFIER_MODEL_KIND:
             grid: list[dict[str, float | int]] = []
             for n_estimators in (120, 227):
                 for learning_rate in (0.04, 0.0674):
@@ -1639,6 +1653,12 @@ def run_pipeline(
         from src.pipeline.model_testing import run_model_testing_mode
 
         run_dir = run_model_testing_mode(config, overrides_use, logger=logger)
+        publish_model_testing_run_summary(run_dir)
+        return run_dir
+    if overrides_use.run_mode == "saved_config_evaluation_mode":
+        from src.pipeline.saved_config_evaluation import run_saved_config_evaluation_mode
+
+        run_dir = run_saved_config_evaluation_mode(config, overrides_use, logger=logger)
         publish_model_testing_run_summary(run_dir)
         return run_dir
     if overrides_use.run_mode == "xgb_calibration_mode":

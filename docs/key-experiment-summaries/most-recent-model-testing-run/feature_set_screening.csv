@@ -1,3 +1,2 @@
 target_family,output_mode,feature_set_id,rank,primary_metric,primary_mean,primary_std,screen_score,recommended_take_forward,r2_mean,rmse_mean,mae_mean,f0_5_mean,roc_auc_mean,pr_auc_mean
-v25_policies,single_target,lambda_policies_plus_sentence_prose,1,r2,0.34154969869921303,0.0,0.34154969869921303,True,0.34154969869921303,0.28403510277584343,0.1995419428398955,,,
-taste_policies,single_target,lambda_policies_plus_sentence_prose,1,f0_5,0.7533589698701287,0.0,0.7533589698701287,True,,,,0.7533589698701287,0.924355777862384,0.7691280629826667
+v25_policies,single_target,sentence_prose,1,r2,0.341054448668608,0.0,0.341054448668608,True,0.341054448668608,0.2836560922012912,0.20114997408248064,,,

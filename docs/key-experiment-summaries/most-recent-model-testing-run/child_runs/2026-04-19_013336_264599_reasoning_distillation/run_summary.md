@@ -8,7 +8,7 @@
 - Intermediary banks prepared: 2
 - Feature-set comparisons run: 1
 - Distillation models run per target: 1
-- Max parallel workers: 2
+- Max parallel workers: 1
 - Public CV strategy: stratified on quantile buckets of the row-wise mean selected target score.
 - CV seed repeats: 1 (enabled=False)
 - Nested hyperparameter sweep requested: False

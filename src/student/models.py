@@ -2,20 +2,81 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+from scipy.special import expit
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge
 from sklearn.neural_network import MLPClassifier, MLPRegressor
+from sklearn.svm import LinearSVC, LinearSVR
 
 from src.utils.dependencies import require_dependency
+from src.utils.model_ids import (
+    DEFAULT_XGB_MAX_DEPTH,
+    XGB_CLASSIFIER_MODEL_KIND,
+    XGB_REGRESSOR_MODEL_KIND,
+    normalize_xgb_model_kind,
+)
 from src.utils.parallel import preferred_thread_count
 
 
 DEFAULT_MODEL_THREADS = preferred_thread_count()
+DEFAULT_MLP_HIDDEN_LAYER_SIZES = (128,)
+
+
+class SigmoidLinearSVC(BaseEstimator, ClassifierMixin):
+    """LinearSVC with direct sigmoid score mapping for predict_proba.
+
+    This avoids an internal calibration CV while preserving a probability-like
+    score in [0, 1] for downstream ranking/threshold code paths.
+    """
+
+    def __init__(
+        self,
+        *,
+        C: float = 1.0,
+        loss: str = "squared_hinge",
+        dual: str | bool = "auto",
+        max_iter: int = 10_000,
+        random_state: int | None = None,
+    ) -> None:
+        self.C = C
+        self.loss = loss
+        self.dual = dual
+        self.max_iter = max_iter
+        self.random_state = random_state
+
+    def fit(self, X: Any, y: Any) -> "SigmoidLinearSVC":
+        self.estimator_ = LinearSVC(
+            C=float(self.C),
+            loss=str(self.loss),
+            dual=self.dual,
+            max_iter=int(self.max_iter),
+            random_state=self.random_state,
+        )
+        self.estimator_.fit(X, y)
+        self.classes_ = self.estimator_.classes_
+        return self
+
+    def decision_function(self, X: Any) -> np.ndarray:
+        return np.asarray(self.estimator_.decision_function(X), dtype=float)
+
+    def predict(self, X: Any) -> np.ndarray:
+        return np.asarray(self.estimator_.predict(X))
+
+    def predict_proba(self, X: Any) -> np.ndarray:
+        scores = self.decision_function(X)
+        if scores.ndim == 1:
+            probs_pos = expit(scores)
+            return np.column_stack([1.0 - probs_pos, probs_pos])
+        shifted = scores - np.max(scores, axis=1, keepdims=True)
+        exp_scores = np.exp(shifted)
+        return exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
 
 
 XGB_CLASSIFIER_PARAMS = {
-    "n_estimators": 227,
-    "max_depth": 1,
+    "n_estimators": 320,
+    "max_depth": DEFAULT_XGB_MAX_DEPTH,
     "learning_rate": 0.0674,
     "subsample": 0.949,
     "colsample_bytree": 0.413,
@@ -30,8 +91,8 @@ XGB_CLASSIFIER_PARAMS = {
 }
 
 XGB_REGRESSOR_PARAMS = {
-    "n_estimators": 227,
-    "max_depth": 1,
+    "n_estimators": 320,
+    "max_depth": DEFAULT_XGB_MAX_DEPTH,
     "learning_rate": 0.0674,
     "subsample": 0.949,
     "colsample_bytree": 0.413,
@@ -82,18 +143,19 @@ def build_reasoning_regressor(
     random_state: int,
     param_overrides: dict[str, Any] | None = None,
 ) -> Any:
+    model_kind = normalize_xgb_model_kind(model_kind)
     overrides = param_overrides or {}
     if model_kind == "ridge":
         return Ridge(alpha=float(overrides.get("alpha", 1.0)))
-    if model_kind == "xgb1_regressor":
-        require_dependency("xgboost", "build the xgb1_regressor reasoning model")
+    if model_kind == XGB_REGRESSOR_MODEL_KIND:
+        require_dependency("xgboost", f"build the {XGB_REGRESSOR_MODEL_KIND} reasoning model")
         import xgboost as xgb  # type: ignore
 
         params = {**XGB_REGRESSOR_PARAMS, **overrides}
         return xgb.XGBRegressor(random_state=random_state, **params)
     if model_kind == "mlp_regressor":
         return MLPRegressor(
-            hidden_layer_sizes=tuple(overrides.get("hidden_layer_sizes", (32,))),
+            hidden_layer_sizes=tuple(overrides.get("hidden_layer_sizes", DEFAULT_MLP_HIDDEN_LAYER_SIZES)),
             alpha=float(overrides.get("alpha", 0.1)),
             learning_rate_init=float(overrides.get("learning_rate_init", 1e-3)),
             max_iter=int(overrides.get("max_iter", 1000)),
@@ -107,6 +169,13 @@ def build_reasoning_regressor(
             alpha=float(overrides.get("alpha", 0.01)),
             l1_ratio=float(overrides.get("l1_ratio", 0.5)),
             max_iter=int(overrides.get("max_iter", 5000)),
+            random_state=random_state,
+        )
+    if model_kind == "linear_svr_regressor":
+        return LinearSVR(
+            C=float(overrides.get("C", 1.0)),
+            epsilon=float(overrides.get("epsilon", 0.1)),
+            max_iter=int(overrides.get("max_iter", 10_000)),
             random_state=random_state,
         )
     if model_kind == "randomforest_regressor":
@@ -127,6 +196,7 @@ def build_reasoning_regressor(
 
 
 def build_downstream_classifier(model_kind: str, *, random_state: int) -> Any:
+    model_kind = normalize_xgb_model_kind(model_kind)
     if model_kind == "lr_classifier":
         return LogisticRegression(
             solver="lbfgs",
@@ -134,8 +204,8 @@ def build_downstream_classifier(model_kind: str, *, random_state: int) -> Any:
             max_iter=3000,
             random_state=random_state,
         )
-    if model_kind == "xgb1_classifier":
-        require_dependency("xgboost", "build the xgb1_classifier downstream model")
+    if model_kind == XGB_CLASSIFIER_MODEL_KIND:
+        require_dependency("xgboost", f"build the {XGB_CLASSIFIER_MODEL_KIND} downstream model")
         import xgboost as xgb  # type: ignore
 
         return xgb.XGBClassifier(random_state=random_state, **XGB_CLASSIFIER_PARAMS)
@@ -148,6 +218,7 @@ def build_reasoning_classifier(
     random_state: int,
     param_overrides: dict[str, Any] | None = None,
 ) -> Any:
+    model_kind = normalize_xgb_model_kind(model_kind)
     overrides = param_overrides or {}
     if model_kind == "logreg_classifier":
         return LogisticRegression(
@@ -156,15 +227,15 @@ def build_reasoning_classifier(
             max_iter=3000,
             random_state=random_state,
         )
-    if model_kind == "xgb1_classifier":
-        require_dependency("xgboost", "build the xgb1_classifier reasoning model")
+    if model_kind == XGB_CLASSIFIER_MODEL_KIND:
+        require_dependency("xgboost", f"build the {XGB_CLASSIFIER_MODEL_KIND} reasoning model")
         import xgboost as xgb  # type: ignore
 
         params = {**XGB_CLASSIFIER_PARAMS, **overrides}
         return xgb.XGBClassifier(random_state=random_state, **params)
     if model_kind == "mlp_classifier":
         return MLPClassifier(
-            hidden_layer_sizes=tuple(overrides.get("hidden_layer_sizes", (32,))),
+            hidden_layer_sizes=tuple(overrides.get("hidden_layer_sizes", DEFAULT_MLP_HIDDEN_LAYER_SIZES)),
             alpha=float(overrides.get("alpha", 0.1)),
             learning_rate_init=float(overrides.get("learning_rate_init", 1e-3)),
             max_iter=int(overrides.get("max_iter", 1000)),
@@ -180,6 +251,14 @@ def build_reasoning_classifier(
             l1_ratio=float(overrides.get("l1_ratio", 0.5)),
             C=float(overrides.get("C", 1.0)),
             max_iter=int(overrides.get("max_iter", 5000)),
+            random_state=random_state,
+        )
+    if model_kind == "linear_svm_classifier":
+        return SigmoidLinearSVC(
+            C=float(overrides.get("C", 1.0)),
+            loss=str(overrides.get("loss", "squared_hinge")),
+            dual=overrides.get("dual", "auto"),
+            max_iter=int(overrides.get("max_iter", 10_000)),
             random_state=random_state,
         )
     if model_kind == "randomforest_classifier":

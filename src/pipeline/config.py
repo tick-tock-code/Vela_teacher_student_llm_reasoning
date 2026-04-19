@@ -3,6 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.utils.artifact_io import read_json
+from src.utils.model_ids import (
+    LEGACY_XGB_CLASSIFIER_MODEL_KIND,
+    LEGACY_XGB_FAMILY_ID,
+    LEGACY_XGB_REGRESSOR_MODEL_KIND,
+    XGB_CLASSIFIER_MODEL_KIND,
+    XGB_FAMILY_ID,
+    XGB_REGRESSOR_MODEL_KIND,
+    normalize_xgb_family_id,
+    normalize_xgb_model_kind,
+)
 from src.utils.paths import resolve_repo_path
 
 
@@ -10,6 +20,7 @@ SUPPORTED_RUN_MODES = {
     "reproduction_mode",
     "reasoning_distillation_mode",
     "model_testing_mode",
+    "saved_config_evaluation_mode",
     "xgb_calibration_mode",
     "rf_calibration_mode",
     "mlp_calibration_mode",
@@ -23,9 +34,13 @@ SUPPORTED_INTERMEDIARY_FEATURE_KINDS = {
 
 SUPPORTED_DISTILLATION_MODEL_KINDS = {
     "ridge",
-    "xgb1_regressor",
+    LEGACY_XGB_REGRESSOR_MODEL_KIND,
+    XGB_REGRESSOR_MODEL_KIND,
+    "linear_svr_regressor",
     "logreg_classifier",
-    "xgb1_classifier",
+    LEGACY_XGB_CLASSIFIER_MODEL_KIND,
+    XGB_CLASSIFIER_MODEL_KIND,
+    "linear_svm_classifier",
     "mlp_regressor",
     "elasticnet_regressor",
     "randomforest_regressor",
@@ -47,7 +62,9 @@ SUPPORTED_TARGET_TASK_KINDS = {
 
 SUPPORTED_MODEL_TESTING_FAMILIES = {
     "linear_l2",
-    "xgb1",
+    "linear_svm",
+    LEGACY_XGB_FAMILY_ID,
+    XGB_FAMILY_ID,
     "mlp",
     "elasticnet",
     "randomforest",
@@ -174,7 +191,7 @@ class ReproductionSpec:
 class ModelTestingSpec:
     candidate_feature_sets: list[str]
     default_model_families: list[str]
-    run_advanced_models_default: bool
+    save_model_configs_after_training_default: bool
     screening_repeat_cv_count: int
     screening_score_delta: float
     max_recommended_feature_sets: int
@@ -548,8 +565,8 @@ def load_experiment_config(path: str) -> ExperimentConfig:
 
     distillation_models = [
         DistillationModelSpec(
-            model_id=str(item["model_id"]),
-            kind=str(item["kind"]),
+            model_id=normalize_xgb_model_kind(str(item["model_id"])),
+            kind=normalize_xgb_model_kind(str(item["kind"])),
             supported_task_kinds=[str(value) for value in item.get("supported_task_kinds", [])],
         )
         for item in payload.get("distillation_models", [])
@@ -660,14 +677,17 @@ def load_experiment_config(path: str) -> ExperimentConfig:
             )
         ],
         default_model_families=[
-            str(value)
+            normalize_xgb_family_id(str(value))
             for value in model_testing_payload.get(
                 "default_model_families",
-                ["linear_l2", "xgb1", "mlp", "randomforest"],
+                ["linear_l2", "linear_svm", XGB_FAMILY_ID, "mlp", "randomforest"],
             )
         ],
-        run_advanced_models_default=bool(
-            model_testing_payload.get("run_advanced_models_default", False)
+        save_model_configs_after_training_default=bool(
+            model_testing_payload.get(
+                "save_model_configs_after_training_default",
+                model_testing_payload.get("run_advanced_models_default", False),
+            )
         ),
         screening_repeat_cv_count=int(
             model_testing_payload.get("screening_repeat_cv_count", 3)

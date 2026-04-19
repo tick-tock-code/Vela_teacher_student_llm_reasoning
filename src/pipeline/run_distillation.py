@@ -5,6 +5,7 @@ import argparse
 from src.pipeline.config import load_experiment_config
 from src.pipeline.distillation import run_pipeline
 from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides
+from src.utils.model_ids import XGB_FAMILY_ID
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,7 +19,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--run-mode",
-        choices=["reproduction_mode", "reasoning_distillation_mode", "model_testing_mode", "xgb_calibration_mode", "rf_calibration_mode", "mlp_calibration_mode"],
+        choices=[
+            "reproduction_mode",
+            "reasoning_distillation_mode",
+            "model_testing_mode",
+            "saved_config_evaluation_mode",
+            "xgb_calibration_mode",
+            "rf_calibration_mode",
+            "mlp_calibration_mode",
+        ],
         help="Pipeline mode. Defaults to the config default.",
     )
     parser.add_argument(
@@ -75,12 +84,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--candidate-feature-sets",
         nargs="*",
-        help="Feature-set ids used by model_testing_mode screening/advanced runs.",
+        help="Feature-set ids used by model_testing_mode screening runs.",
     )
     parser.add_argument(
         "--model-families",
         nargs="*",
-        help="Model families for model_testing_mode: linear_l2, xgb1, mlp, elasticnet, randomforest.",
+        help=f"Model families for model_testing_mode: linear_l2, linear_svm, {XGB_FAMILY_ID}, mlp, elasticnet, randomforest.",
     )
     parser.add_argument(
         "--output-modes",
@@ -88,10 +97,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output modes for model_testing_mode: single_target, multi_output.",
     )
     parser.add_argument(
-        "--run-advanced-models",
+        "--save-model-configs-after-training",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="In model_testing_mode, run stage-B advanced model comparisons on shortlisted feature sets.",
+        help="In model_testing_mode, save final full-train model config bundle after Stage A training.",
+    )
+    parser.add_argument(
+        "--saved-config-bundle-path",
+        help="Bundle path (or run-id) for saved_config_evaluation_mode.",
+    )
+    parser.add_argument(
+        "--saved-eval-mode",
+        choices=["reasoning_test_metrics", "success_with_pred_reasoning"],
+        help="Evaluation mode for saved_config_evaluation_mode.",
+    )
+    parser.add_argument(
+        "--hq-exit-override-mode",
+        choices=["with_override", "both_with_and_without"],
+        help="HQ override behavior in saved_config_evaluation_mode success evaluation.",
     )
     parser.add_argument(
         "--xgb-calibration-estimators",
@@ -259,7 +282,22 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
             if args.output_modes
             else None
         ),
-        run_advanced_models=args.run_advanced_models,
+        save_model_configs_after_training=args.save_model_configs_after_training,
+        saved_config_bundle_path=(
+            str(args.saved_config_bundle_path)
+            if args.saved_config_bundle_path
+            else None
+        ),
+        saved_eval_mode=(
+            str(args.saved_eval_mode)
+            if args.saved_eval_mode
+            else None
+        ),
+        hq_exit_override_mode=(
+            str(args.hq_exit_override_mode)
+            if args.hq_exit_override_mode
+            else None
+        ),
         xgb_calibration_estimators=(
             [int(item) for item in args.xgb_calibration_estimators]
             if args.xgb_calibration_estimators

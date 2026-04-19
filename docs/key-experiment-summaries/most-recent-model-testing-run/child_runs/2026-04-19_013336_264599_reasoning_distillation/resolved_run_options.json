@@ -90,17 +90,16 @@
   ],
   "distillation_feature_sets": [
     {
-      "feature_set_id": "lambda_policies_plus_sentence_prose",
+      "feature_set_id": "sentence_prose",
       "feature_bank_ids": [
-        "lambda_policies",
         "sentence_prose"
       ]
     }
   ],
   "distillation_models": [
     {
-      "model_id": "xgb1_regressor",
-      "kind": "xgb1_regressor",
+      "model_id": "ridge",
+      "kind": "ridge",
       "supported_task_kinds": [
         "regression"
       ]
@@ -111,7 +110,7 @@
   "distillation_nested_sweep": false,
   "save_reasoning_predictions": false,
   "candidate_feature_sets": [
-    "lambda_policies_plus_sentence_prose"
+    "sentence_prose"
   ],
   "model_families": [],
   "output_modes": [
@@ -119,6 +118,10 @@
   ],
   "model_family_output_modes": {},
   "run_advanced_models": false,
+  "save_model_configs_after_training": false,
+  "saved_config_bundle_path": null,
+  "saved_eval_mode": null,
+  "hq_exit_override_mode": "with_override",
   "xgb_calibration_estimators": [
     40,
     80,
@@ -169,21 +172,15 @@
   "mlp_hidden_layer_sizes": null,
   "mlp_alpha": null,
   "xgb_model_param_overrides_by_model_id": {
-    "xgb1_regressor": {
-      "reg_alpha": 2.0,
-      "reg_lambda": 15.0
-    },
-    "xgb1_classifier": {
-      "reg_alpha": 2.0,
-      "reg_lambda": 15.0
-    },
     "mlp_regressor": {
-      "tol": 0.001
+      "tol": 0.001,
+      "early_stopping": false
     },
     "mlp_classifier": {
-      "tol": 0.001
+      "tol": 0.001,
+      "early_stopping": false
     }
   },
   "rf_model_param_overrides_by_model_id": {},
-  "max_parallel_workers": 2
+  "max_parallel_workers": 1
 }

@@ -38,6 +38,7 @@ from src.pipeline.run_options import RunOverrides, resolve_run_options
 from src.pipeline.mlp_calibration import load_latest_mlp_calibration
 from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 from src.pipeline.rf_calibration import load_latest_rf_calibration
+from src.student.models import build_reasoning_classifier, build_reasoning_regressor
 
 
 def _workspace_temp_dir() -> Path:
@@ -74,6 +75,23 @@ def _sample_public_raw() -> pd.DataFrame:
 
 
 class ComponentTests(unittest.TestCase):
+    def test_linear_svm_reasoning_builders_construct_expected_estimators(self) -> None:
+        regressor = build_reasoning_regressor("linear_svr_regressor", random_state=42)
+        self.assertEqual(regressor.C, 1.0)
+        self.assertEqual(regressor.epsilon, 0.1)
+
+        classifier = build_reasoning_classifier("linear_svm_classifier", random_state=42)
+        X = pd.DataFrame(
+            {
+                "x1": [0.0, 1.0, 0.9, 0.1, 0.8, 0.2],
+                "x2": [0.0, 1.0, 0.8, 0.2, 0.7, 0.3],
+            }
+        ).to_numpy(dtype=float)
+        y = pd.Series([0, 1, 1, 0, 1, 0]).to_numpy(dtype=int)
+        classifier.fit(X, y)
+        probs = classifier.predict_proba(X)
+        self.assertEqual(probs.shape, (6, 2))
+
     def test_default_config_defaults_to_reproduction_mode(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
         self.assertEqual(config.defaults.run_mode, "reproduction_mode")
@@ -411,6 +429,135 @@ class ComponentTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_selections_to_overrides_preserves_xgb_overrides_and_max_parallel_workers(self) -> None:
+        selections = LauncherSelections(
+            config_path="experiments/teacher_student_distillation_v1.json",
+            run_mode="model_testing_mode",
+            target_family="v25_and_taste",
+            heldout_evaluation=False,
+            active_feature_banks=None,
+            force_rebuild_intermediary_features=False,
+            reasoning_models=None,
+            embedding_model_name="sentence-transformers/all-MiniLM-L6-v2",
+            xgb_model_param_overrides_by_model_id={
+                "xgb3_regressor": {"n_estimators": 320, "max_depth": 3},
+                "xgb3_classifier": {"n_estimators": 320, "max_depth": 3},
+            },
+            max_parallel_workers=2,
+        )
+        overrides = selections_to_overrides(selections)
+        self.assertEqual(overrides.max_parallel_workers, 2)
+        self.assertEqual(
+            overrides.xgb_model_param_overrides_by_model_id,
+            {
+                "xgb3_regressor": {"n_estimators": 320, "max_depth": 3},
+                "xgb3_classifier": {"n_estimators": 320, "max_depth": 3},
+            },
+        )
+
+    def test_xgb_depth_test_batch_selections_are_locked_preset(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:  # pragma: no cover - depends on desktop availability
+            self.skipTest(f"Tk is unavailable in this environment: {exc}")
+        root.withdraw()
+        try:
+            launcher = RunLauncher(root)
+            batch = launcher._xgb_depth_test_batch_selections()
+            self.assertEqual([depth for depth, _ in batch], [3, 5])
+            for depth, selection in batch:
+                self.assertEqual(selection.run_mode, "model_testing_mode")
+                self.assertEqual(selection.target_family, "v25_and_taste")
+                self.assertEqual(
+                    selection.candidate_feature_sets,
+                    [
+                        "hq_plus_sentence_prose",
+                        "hq_plus_sentence_bundle",
+                        "lambda_policies_plus_sentence_prose",
+                        "lambda_policies_plus_sentence_bundle",
+                    ],
+                )
+                self.assertEqual(selection.model_families, ["xgb3"])
+                self.assertEqual(selection.output_modes, ["single_target"])
+                self.assertEqual(selection.model_family_output_modes, {"xgb3": ["single_target"]})
+                self.assertFalse(selection.save_model_configs_after_training)
+                self.assertTrue(selection.repeat_cv_with_new_seeds)
+                self.assertEqual(selection.cv_seed_repeat_count, 4)
+                self.assertFalse(selection.use_latest_xgb_calibration)
+                self.assertFalse(selection.use_latest_rf_calibration)
+                self.assertFalse(selection.use_latest_mlp_calibration)
+                self.assertEqual(selection.max_parallel_workers, 2)
+                self.assertEqual(
+                    selection.xgb_model_param_overrides_by_model_id,
+                    {
+                        "xgb3_regressor": {"n_estimators": 320, "max_depth": depth},
+                        "xgb3_classifier": {"n_estimators": 320, "max_depth": depth},
+                    },
+                )
+        finally:
+            root.destroy()
+
+    def test_execute_xgb_depth_batch_fails_fast_on_first_run_error(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        batch = [
+            (
+                3,
+                LauncherSelections(
+                    config_path="experiments/teacher_student_distillation_v1.json",
+                    run_mode="model_testing_mode",
+                    target_family="v25_and_taste",
+                    heldout_evaluation=False,
+                    active_feature_banks=None,
+                    force_rebuild_intermediary_features=False,
+                    reasoning_models=None,
+                    embedding_model_name="sentence-transformers/all-MiniLM-L6-v2",
+                    xgb_model_param_overrides_by_model_id={
+                        "xgb3_regressor": {"n_estimators": 320, "max_depth": 3},
+                        "xgb3_classifier": {"n_estimators": 320, "max_depth": 3},
+                    },
+                    max_parallel_workers=2,
+                ),
+            ),
+            (
+                5,
+                LauncherSelections(
+                    config_path="experiments/teacher_student_distillation_v1.json",
+                    run_mode="model_testing_mode",
+                    target_family="v25_and_taste",
+                    heldout_evaluation=False,
+                    active_feature_banks=None,
+                    force_rebuild_intermediary_features=False,
+                    reasoning_models=None,
+                    embedding_model_name="sentence-transformers/all-MiniLM-L6-v2",
+                    xgb_model_param_overrides_by_model_id={
+                        "xgb3_regressor": {"n_estimators": 320, "max_depth": 5},
+                        "xgb3_classifier": {"n_estimators": 320, "max_depth": 5},
+                    },
+                    max_parallel_workers=2,
+                ),
+            ),
+        ]
+        called_depths: list[int] = []
+
+        def fail_on_first(
+            _config,
+            overrides,
+            _logger,
+        ):
+            depth = int(
+                overrides.xgb_model_param_overrides_by_model_id["xgb3_regressor"]["max_depth"]  # type: ignore[index]
+            )
+            called_depths.append(depth)
+            raise RuntimeError("intentional failure")
+
+        with self.assertRaises(RuntimeError):
+            RunLauncher._execute_xgb_depth_batch(
+                config=config,
+                batch=batch,
+                run_once=fail_on_first,
+            )
+        self.assertEqual(called_depths, [3])
+
     def test_model_testing_mode_maps_model_families_by_task_kind(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
         resolved_regression = resolve_run_options(
@@ -419,12 +566,12 @@ class ComponentTests(unittest.TestCase):
                 run_mode="model_testing_mode",
                 target_family="v25_policies",
                 candidate_feature_sets=["sentence_bundle"],
-                model_families=["linear_l2", "xgb1"],
+                model_families=["linear_l2", "linear_svm", "xgb3"],
             ),
         )
         self.assertEqual(
             sorted(spec.model_id for spec in resolved_regression.distillation_models),
-            ["ridge", "xgb1_regressor"],
+            ["linear_svr_regressor", "ridge", "xgb3_regressor"],
         )
         self.assertEqual(resolved_regression.output_modes, ["single_target"])
 
@@ -434,12 +581,12 @@ class ComponentTests(unittest.TestCase):
                 run_mode="model_testing_mode",
                 target_family="taste_policies",
                 candidate_feature_sets=["sentence_bundle"],
-                model_families=["linear_l2", "xgb1"],
+                model_families=["linear_l2", "linear_svm", "xgb3"],
             ),
         )
         self.assertEqual(
             sorted(spec.model_id for spec in resolved_classification.distillation_models),
-            ["logreg_classifier", "xgb1_classifier"],
+            ["linear_svm_classifier", "logreg_classifier", "xgb3_classifier"],
         )
 
     def test_reasoning_distillation_defaults_nested_sweep_to_off(self) -> None:
@@ -462,11 +609,39 @@ class ComponentTests(unittest.TestCase):
                 run_mode="model_testing_mode",
                 target_family="v25_policies",
                 candidate_feature_sets=["sentence_bundle"],
-                model_families=["linear_l2"],
+                model_families=["mlp"],
                 output_modes=["single_target", "multi_output"],
             ),
         )
         self.assertEqual(resolved.output_modes, ["single_target", "multi_output"])
+
+    def test_model_testing_mode_rejects_multi_output_for_non_mlp_family(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        with self.assertRaises(RuntimeError):
+            resolve_run_options(
+                config,
+                RunOverrides(
+                    run_mode="model_testing_mode",
+                    target_family="v25_policies",
+                    candidate_feature_sets=["sentence_bundle"],
+                    model_families=["linear_l2"],
+                    output_modes=["single_target", "multi_output"],
+                ),
+            )
+
+    def test_reasoning_distillation_mode_rejects_multi_output_for_non_mlp_models(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        with self.assertRaises(RuntimeError):
+            resolve_run_options(
+                config,
+                RunOverrides(
+                    run_mode="reasoning_distillation_mode",
+                    target_family="v25_policies",
+                    active_feature_banks=["hq_baseline"],
+                    reasoning_models=["linear_svr_regressor"],
+                    output_modes=["multi_output"],
+                ),
+            )
 
     def test_model_testing_mode_defaults_mlp_to_multi_output(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
@@ -507,9 +682,9 @@ class ComponentTests(unittest.TestCase):
         )
         self.assertEqual(resolved.run_mode, "xgb_calibration_mode")
         self.assertFalse(resolved.heldout_evaluation)
-        self.assertEqual([spec.model_id for spec in resolved.distillation_models], ["xgb1_regressor"])
+        self.assertEqual([spec.model_id for spec in resolved.distillation_models], ["xgb3_regressor"])
         self.assertEqual(resolved.output_modes, ["single_target"])
-        self.assertEqual(resolved.model_families, ["xgb1"])
+        self.assertEqual(resolved.model_families, ["xgb3"])
 
     def test_rf_calibration_mode_resolves_rf_only_and_disables_heldout(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
@@ -636,7 +811,7 @@ class ComponentTests(unittest.TestCase):
                 run_mode="model_testing_mode",
                 target_family="v25_policies",
                 candidate_feature_sets=["sentence_bundle"],
-                model_families=["xgb1"],
+                model_families=["xgb3"],
                 use_latest_xgb_calibration=True,
             ),
         )
@@ -669,6 +844,50 @@ class ComponentTests(unittest.TestCase):
             ),
         )
         self.assertTrue(resolved.use_latest_mlp_calibration)
+
+    def test_model_testing_mode_can_enable_save_model_configs_toggle(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="model_testing_mode",
+                target_family="v25_policies",
+                candidate_feature_sets=["sentence_bundle"],
+                model_families=["mlp"],
+                save_model_configs_after_training=True,
+            ),
+        )
+        self.assertTrue(resolved.save_model_configs_after_training)
+
+    def test_saved_config_eval_mode_requires_bundle_path(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        with self.assertRaises(RuntimeError):
+            resolve_run_options(
+                config,
+                RunOverrides(
+                    run_mode="saved_config_evaluation_mode",
+                ),
+            )
+
+    def test_cli_parsing_supports_saved_config_eval_flags(self) -> None:
+        overrides = parse_run_overrides(
+            [
+                "--config",
+                "experiments/teacher_student_distillation_v1.json",
+                "--run-mode",
+                "saved_config_evaluation_mode",
+                "--saved-config-bundle-path",
+                "data/saved_model_configs/example_run",
+                "--saved-eval-mode",
+                "reasoning_test_metrics",
+                "--hq-exit-override-mode",
+                "both_with_and_without",
+            ]
+        )
+        self.assertEqual(overrides.run_mode, "saved_config_evaluation_mode")
+        self.assertEqual(overrides.saved_config_bundle_path, "data/saved_model_configs/example_run")
+        self.assertEqual(overrides.saved_eval_mode, "reasoning_test_metrics")
+        self.assertEqual(overrides.hq_exit_override_mode, "both_with_and_without")
 
     def test_load_latest_xgb_calibration_returns_none_when_missing(self) -> None:
         self.assertIsNone(load_latest_xgb_calibration("definitely_missing_experiment_for_test"))
@@ -710,8 +929,12 @@ class ComponentTests(unittest.TestCase):
             ["linear_l2", "mlp"],
         )
         self.assertEqual(
-            _resolve_stage_a_model_families(["xgb1", "randomforest"]),
-            ["xgb1"],
+            _resolve_stage_a_model_families(["linear_svm", "randomforest"]),
+            ["linear_svm"],
+        )
+        self.assertEqual(
+            _resolve_stage_a_model_families(["xgb3", "randomforest"]),
+            ["xgb3"],
         )
         with self.assertRaises(RuntimeError):
             _resolve_stage_a_model_families(["elasticnet", "randomforest"])
@@ -785,3 +1008,4 @@ class ComponentTests(unittest.TestCase):
             with self.assertRaises(NotImplementedError) as ctx:
                 fn()
             self.assertIn(expected_name, str(ctx.exception))
+

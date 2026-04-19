@@ -4,6 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -20,11 +21,21 @@ from src.evaluation.metrics import binary_classification_metrics, regression_met
 from src.intermediary_features.registry import assemble_feature_sets, prepare_intermediary_banks
 from src.pipeline.config import ExperimentConfig
 from src.pipeline.mlp_calibration import load_latest_mlp_calibration
+from src.pipeline.saved_model_configs import bundle_dir_from_run_id, save_pickle, write_bundle_manifest
 from src.pipeline.run_options import MODEL_FAMILY_TO_MODEL_ID, RunOverrides, resolve_run_options
 from src.pipeline.rf_calibration import load_latest_rf_calibration
 from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 from src.student.models import build_reasoning_classifier, build_reasoning_regressor
 from src.utils.artifact_io import timestamped_run_dir, write_csv, write_json, write_markdown
+from src.utils.model_ids import (
+    LEGACY_XGB_CLASSIFIER_MODEL_KIND,
+    LEGACY_XGB_REGRESSOR_MODEL_KIND,
+    XGB_CLASSIFIER_MODEL_KIND,
+    XGB_FAMILY_ID,
+    XGB_REGRESSOR_MODEL_KIND,
+    normalize_xgb_family_id,
+    normalize_xgb_model_kind,
+)
 from src.utils.parallel import apply_global_thread_env, bounded_worker_count
 from src.utils.paths import RUNS_DIR
 
@@ -36,8 +47,12 @@ DEFAULT_MODEL_TESTING_MLP_TOL = 1e-3
 MODEL_ID_TO_ARCHITECTURE: dict[str, str] = {
     "ridge": "linear_l2",
     "logreg_classifier": "linear_l2",
-    "xgb1_regressor": "xgb1",
-    "xgb1_classifier": "xgb1",
+    "linear_svr_regressor": "linear_svm",
+    "linear_svm_classifier": "linear_svm",
+    LEGACY_XGB_REGRESSOR_MODEL_KIND: XGB_FAMILY_ID,
+    LEGACY_XGB_CLASSIFIER_MODEL_KIND: XGB_FAMILY_ID,
+    XGB_REGRESSOR_MODEL_KIND: XGB_FAMILY_ID,
+    XGB_CLASSIFIER_MODEL_KIND: XGB_FAMILY_ID,
     "mlp_regressor": "mlp",
     "mlp_classifier": "mlp",
     "randomforest_regressor": "randomforest",
@@ -47,12 +62,13 @@ MODEL_ID_TO_ARCHITECTURE: dict[str, str] = {
 }
 ARCHITECTURE_LABELS: dict[str, str] = {
     "linear_l2": "Linear L2",
-    "xgb1": "XGBoost",
+    "linear_svm": "Linear SVM",
+    XGB_FAMILY_ID: "XGBoost",
     "mlp": "MLP",
     "randomforest": "Random Forest",
     "elasticnet": "Elastic Net",
 }
-ARCHITECTURE_ORDER = ["linear_l2", "xgb1", "mlp", "randomforest", "elasticnet"]
+ARCHITECTURE_ORDER = ["linear_l2", "linear_svm", XGB_FAMILY_ID, "mlp", "randomforest", "elasticnet"]
 ARCHITECTURE_SORT_INDEX = {name: index for index, name in enumerate(ARCHITECTURE_ORDER)}
 
 
@@ -148,21 +164,23 @@ def _require_full_overlap(
 
 
 def _resolve_stage_a_model_families(requested_families: list[str]) -> list[str]:
-    allowed = {"linear_l2", "xgb1", "mlp"}
-    selected = [family for family in requested_families if family in allowed]
+    allowed = {"linear_l2", "linear_svm", XGB_FAMILY_ID, "mlp"}
+    selected = [family for family in [normalize_xgb_family_id(v) for v in requested_families] if family in allowed]
+    selected = list(dict.fromkeys(selected))
     if not selected:
         raise RuntimeError(
             "Model-testing Stage A requires at least one screening family enabled: "
-            "`linear_l2`, `xgb1`, and/or `mlp`."
+            f"`linear_l2`, `linear_svm`, `{XGB_FAMILY_ID}`, and/or `mlp`."
         )
     return selected
 
 
 def _nested_param_grid(model_kind: str, task_kind: str) -> list[dict[str, float | int]]:
+    model_kind = normalize_xgb_model_kind(model_kind)
     if task_kind == "regression":
         if model_kind == "ridge":
             return [{"alpha": value} for value in (0.1, 1.0, 10.0, 50.0)]
-        if model_kind == "xgb1_regressor":
+        if model_kind == XGB_REGRESSOR_MODEL_KIND:
             grid: list[dict[str, float | int]] = []
             for n_estimators in (120, 227):
                 for learning_rate in (0.04, 0.0674):
@@ -184,7 +202,7 @@ def _nested_param_grid(model_kind: str, task_kind: str) -> list[dict[str, float 
     if task_kind == "classification":
         if model_kind == "logreg_classifier":
             return [{"C": value} for value in (0.05, 0.1, 0.5, 1.0, 5.0)]
-        if model_kind == "xgb1_classifier":
+        if model_kind == XGB_CLASSIFIER_MODEL_KIND:
             grid: list[dict[str, float | int]] = []
             for n_estimators in (120, 227):
                 for learning_rate in (0.04, 0.0674):
@@ -233,6 +251,19 @@ def _safe_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
     if len(np.unique(y_true)) < 2:
         return 0.5
     return float(roc_auc_score(y_true, y_score))
+
+
+def _predict_binary_probabilities(model: object, X: np.ndarray) -> np.ndarray:
+    if hasattr(model, "predict_proba"):
+        proba = np.asarray(model.predict_proba(X), dtype=float)
+        if proba.ndim == 2:
+            if proba.shape[1] == 1:
+                return proba[:, 0]
+            return proba[:, 1]
+    if hasattr(model, "decision_function"):
+        decision = np.asarray(model.decision_function(X), dtype=float)
+        return 1.0 / (1.0 + np.exp(-decision))
+    raise RuntimeError("Model does not expose predict_proba or decision_function for classification.")
 
 
 def _predict_multi_output_probabilities(model: MultiOutputClassifier, X: np.ndarray, n_targets: int) -> np.ndarray:
@@ -735,11 +766,12 @@ def _render_model_testing_markdown(
         "# Model Testing Report",
         "",
         f"- Repeats: {repeat_count}",
-        "- This report compares shortlisted feature sets grouped by model architecture.",
+        "- Stage B advanced comparisons are inactive in the current pipeline.",
+        "- Use Saved Config Eval mode to run test-set evaluations from persisted Stage A bundles.",
         "",
     ]
     if results.empty:
-        lines.append("Advanced model stage was skipped or produced no rows.")
+        lines.append("No Stage B rows were produced because Stage B execution is inactive.")
         return "\n".join(lines)
 
     results_with_architecture = results.copy()
@@ -1273,6 +1305,213 @@ def _run_stage(
     return pd.concat(stage_rows, ignore_index=True), child_runs
 
 
+def _save_stage_a_model_bundle(
+    *,
+    config: ExperimentConfig,
+    run_dir: Path,
+    combo_requests: list[dict[str, object]],
+    logger: Logger | None,
+) -> Path:
+    if not combo_requests:
+        raise RuntimeError("No Stage A combos were provided for bundle persistence.")
+
+    family_map = {spec.family_id: spec for spec in config.target_families}
+    distillation_model_map = {spec.model_id: spec for spec in config.distillation_models}
+    feature_set_map = {spec.feature_set_id: spec for spec in config.distillation_feature_sets}
+
+    required_feature_set_ids = sorted(
+        {
+            str(feature_set_id)
+            for request in combo_requests
+            for feature_set_id in list(request["feature_set_ids"])
+        }
+    )
+    required_feature_bank_ids = sorted(
+        {
+            feature_bank_id
+            for feature_set_id in required_feature_set_ids
+            for feature_bank_id in feature_set_map[feature_set_id].feature_bank_ids
+        }
+    )
+
+    _log(logger, "Saving model config bundle: loading repository splits and feature banks.")
+    repository_splits = load_feature_repository_splits(config.feature_repository)
+    raw_datasets = load_raw_datasets(
+        Path(config.datasets.public_train_csv),
+        Path(config.datasets.private_test_csv),
+    )
+    repository_banks = load_repository_feature_banks(
+        repository_splits=repository_splits,
+        specs=[
+            spec
+            for spec in config.repository_feature_banks
+            if spec.enabled and spec.feature_bank_id in set(required_feature_bank_ids)
+        ],
+    )
+    intermediary_banks = prepare_intermediary_banks(
+        public_raw=raw_datasets.public_frame,
+        private_raw=raw_datasets.private_frame,
+        feature_specs=[
+            spec
+            for spec in config.intermediary_features
+            if spec.enabled and spec.feature_bank_id in set(required_feature_bank_ids)
+        ],
+        force_rebuild=False,
+        logger=logger,
+    )
+    feature_sets = assemble_feature_sets(
+        public_founder_ids=raw_datasets.public_frame["founder_uuid"],
+        private_founder_ids=raw_datasets.private_frame["founder_uuid"],
+        banks_by_id={**repository_banks, **intermediary_banks},
+        feature_sets=[feature_set_map[feature_set_id] for feature_set_id in required_feature_set_ids],
+    )
+    resolved_feature_sets = {feature_set.feature_set_id: feature_set for feature_set in feature_sets}
+
+    bundle_dir = bundle_dir_from_run_id(run_dir.name)
+    bundle_entries: list[dict[str, object]] = []
+    combo_counter = 0
+
+    for request in combo_requests:
+        family_id = str(request["target_family"])
+        output_mode = str(request["output_mode"])
+        task_kind = str(request["task_kind"])
+        model_ids = [str(value) for value in list(request["model_ids"])]
+        feature_set_ids = [str(value) for value in list(request["feature_set_ids"])]
+        model_overrides = {
+            str(model_id): dict(params)
+            for model_id, params in dict(request["model_param_overrides_by_model_id"]).items()
+        }
+        target_family = load_target_family(family_map[family_id])
+        target_columns = list(target_family.target_columns)
+
+        for feature_set_id in feature_set_ids:
+            if feature_set_id not in resolved_feature_sets:
+                raise RuntimeError(f"Feature set '{feature_set_id}' was not assembled for bundle persistence.")
+            feature_set = resolved_feature_sets[feature_set_id]
+            aligned_targets = _require_full_overlap(
+                feature_set.public_frame[["founder_uuid"]],
+                target_family.train_frame,
+                on="founder_uuid",
+                left_name=f"bundle fit feature set '{feature_set_id}'",
+                right_name=f"target family '{target_family.family_id}'",
+            )
+            if task_kind == "regression":
+                y_public = aligned_targets[target_columns].to_numpy(dtype=float)
+            else:
+                y_public = aligned_targets[target_columns].to_numpy(dtype=int)
+            X_public = feature_set.public_frame[feature_set.feature_columns].to_numpy(dtype=float)
+
+            for model_offset, model_id in enumerate(model_ids):
+                combo_counter += 1
+                model_spec = distillation_model_map[model_id]
+                combo_id = (
+                    f"{family_id}__{feature_set_id}__{model_id}__{output_mode}__{combo_counter:04d}"
+                )
+                _log(
+                    logger,
+                    f"Saving bundle model {combo_counter}: "
+                    f"{family_id} | {feature_set_id} | {model_id} | {output_mode}.",
+                )
+                thresholds_by_target: dict[str, float] = {}
+
+                if output_mode == "multi_output":
+                    if task_kind == "regression":
+                        base_model = build_reasoning_regressor(
+                            model_spec.kind,
+                            random_state=config.distillation_cv.random_state + model_offset,
+                            param_overrides=model_overrides.get(model_id, {}),
+                        )
+                        model = MultiOutputRegressor(base_model)
+                        model.fit(X_public, y_public)
+                    else:
+                        base_model = build_reasoning_classifier(
+                            model_spec.kind,
+                            random_state=config.distillation_cv.random_state + model_offset,
+                            param_overrides=model_overrides.get(model_id, {}),
+                        )
+                        model = MultiOutputClassifier(base_model)
+                        model.fit(X_public, y_public)
+                        train_probs = _predict_multi_output_probabilities(
+                            model,
+                            X_public,
+                            len(target_columns),
+                        )
+                        for target_idx, target_name in enumerate(target_columns):
+                            thresholds_by_target[target_name] = float(
+                                select_f05_threshold(y_public[:, target_idx], train_probs[:, target_idx])
+                            )
+                    rel_path = Path("models") / f"{combo_id}.pkl"
+                    save_pickle(bundle_dir / rel_path, model)
+                    entry = {
+                        "combo_id": combo_id,
+                        "target_family": family_id,
+                        "task_kind": task_kind,
+                        "output_mode": output_mode,
+                        "feature_set_id": feature_set_id,
+                        "model_id": model_id,
+                        "feature_columns": list(feature_set.feature_columns),
+                        "target_columns": target_columns,
+                        "thresholds_by_target": thresholds_by_target,
+                        "model_artifact_relpath": str(rel_path.as_posix()),
+                    }
+                    bundle_entries.append(entry)
+                    continue
+
+                if output_mode != "single_target":
+                    raise RuntimeError(f"Unsupported output_mode '{output_mode}' for bundle persistence.")
+                target_model_artifacts: dict[str, str] = {}
+                for target_idx, target_name in enumerate(target_columns):
+                    if task_kind == "regression":
+                        model = build_reasoning_regressor(
+                            model_spec.kind,
+                            random_state=config.distillation_cv.random_state + model_offset + target_idx,
+                            param_overrides=model_overrides.get(model_id, {}),
+                        )
+                        model.fit(X_public, y_public[:, target_idx])
+                    else:
+                        model = build_reasoning_classifier(
+                            model_spec.kind,
+                            random_state=config.distillation_cv.random_state + model_offset + target_idx,
+                            param_overrides=model_overrides.get(model_id, {}),
+                        )
+                        model.fit(X_public, y_public[:, target_idx])
+                        train_probs = _predict_binary_probabilities(model, X_public)
+                        thresholds_by_target[target_name] = float(
+                            select_f05_threshold(y_public[:, target_idx], train_probs)
+                        )
+                    rel_path = Path("models") / f"{combo_id}__{target_name}.pkl"
+                    save_pickle(bundle_dir / rel_path, model)
+                    target_model_artifacts[target_name] = str(rel_path.as_posix())
+                bundle_entries.append(
+                    {
+                        "combo_id": combo_id,
+                        "target_family": family_id,
+                        "task_kind": task_kind,
+                        "output_mode": output_mode,
+                        "feature_set_id": feature_set_id,
+                        "model_id": model_id,
+                        "feature_columns": list(feature_set.feature_columns),
+                        "target_columns": target_columns,
+                        "thresholds_by_target": thresholds_by_target,
+                        "target_model_artifacts": target_model_artifacts,
+                    }
+                )
+
+    manifest = {
+        "bundle_version": 1,
+        "experiment_id": config.experiment_id,
+        "source_run_id": run_dir.name,
+        "source_run_dir": str(run_dir),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "saved_models_kind": "final_full_train_only",
+        "combos": bundle_entries,
+    }
+    write_bundle_manifest(bundle_dir, manifest)
+    write_json(bundle_dir / "resolved_config.json", asdict(config))
+    _log(logger, f"Saved model config bundle with {len(bundle_entries)} combos at {bundle_dir}.")
+    return bundle_dir
+
+
 def run_model_testing_mode(
     config: ExperimentConfig,
     overrides: RunOverrides | None = None,
@@ -1341,9 +1580,17 @@ def run_model_testing_mode(
         "tol",
         DEFAULT_MODEL_TESTING_MLP_TOL,
     )
+    model_param_overrides_by_model_id.setdefault("mlp_regressor", {}).setdefault(
+        "early_stopping",
+        False,
+    )
     model_param_overrides_by_model_id.setdefault("mlp_classifier", {}).setdefault(
         "tol",
         DEFAULT_MODEL_TESTING_MLP_TOL,
+    )
+    model_param_overrides_by_model_id.setdefault("mlp_classifier", {}).setdefault(
+        "early_stopping",
+        False,
     )
     latest_calibration: dict[str, object] | None = None
     latest_rf_calibration: dict[str, object] | None = None
@@ -1370,6 +1617,7 @@ def run_model_testing_mode(
     stage_a_rows: list[pd.DataFrame] = []
     stage_a_child_runs: list[dict[str, object]] = []
     stage_a_nested_effective_map: dict[str, bool] = {}
+    stage_a_combo_requests: list[dict[str, object]] = []
     for family_id in family_sequence:
         for output_mode in output_modes:
             stage_a_families_for_mode = [
@@ -1403,7 +1651,7 @@ def run_model_testing_mode(
                 selected_map = dict(latest_calibration.get("selected_n_estimators_by_family", {}))
                 selected_n = selected_map.get(family_id)
                 if selected_n is not None:
-                    xgb_model_id = "xgb1_regressor" if task_kind == "regression" else "xgb1_classifier"
+                    xgb_model_id = XGB_REGRESSOR_MODEL_KIND if task_kind == "regression" else XGB_CLASSIFIER_MODEL_KIND
                     if xgb_model_id in stage_a_model_ids:
                         stage_model_overrides[xgb_model_id] = {
                             **dict(stage_model_overrides.get(xgb_model_id, {})),
@@ -1454,6 +1702,16 @@ def run_model_testing_mode(
             )
             stage_a_rows.append(stage_metrics)
             stage_a_child_runs.extend(child_runs)
+            stage_a_combo_requests.append(
+                {
+                    "target_family": family_id,
+                    "task_kind": task_kind,
+                    "output_mode": output_mode,
+                    "feature_set_ids": list(feature_set_ids),
+                    "model_ids": list(stage_a_model_ids),
+                    "model_param_overrides_by_model_id": dict(stage_model_overrides),
+                }
+            )
 
     stage_a_repeat_metrics = pd.concat(stage_a_rows, ignore_index=True) if stage_a_rows else pd.DataFrame()
     write_csv(run_dir / "feature_set_screening_repeat_metrics.csv", stage_a_repeat_metrics)
@@ -1518,114 +1776,6 @@ def run_model_testing_mode(
     )
 
     model_testing_results = pd.DataFrame()
-    model_testing_runs: list[dict[str, object]] = []
-    stage_b_nested_effective_map: dict[str, bool] = {}
-    if resolved.run_advanced_models:
-        stage_b_rows: list[pd.DataFrame] = []
-        for family_id in family_sequence:
-            for output_mode in output_modes:
-                shortlisted = recommended_sets.get((family_id, output_mode), [])
-                if not shortlisted:
-                    continue
-                task_kind = family_map[family_id].task_kind
-                model_families_for_mode = [
-                    family_name
-                    for family_name in resolved.model_families
-                    if output_mode in model_family_output_modes.get(family_name, [])
-                ]
-                if not model_families_for_mode:
-                    continue
-                model_ids = _resolve_model_ids(
-                    config,
-                    task_kind=task_kind,
-                    model_families=model_families_for_mode,
-                )
-                stage_b_model_specs = [
-                    spec for spec in config.distillation_models if spec.model_id in set(model_ids)
-                ]
-                stage_b_nested_effective = _effective_nested_flag_for_models(
-                    requested_nested=resolved.distillation_nested_sweep,
-                    model_specs=stage_b_model_specs,
-                    task_kind=task_kind,
-                    logger=logger,
-                    context_label=f"{family_id} ({output_mode}) Stage B",
-                )
-                stage_b_nested_effective_map[f"{family_id}::{output_mode}"] = stage_b_nested_effective
-                stage_model_overrides = dict(model_param_overrides_by_model_id)
-                if latest_calibration is not None:
-                    selected_map = dict(latest_calibration.get("selected_n_estimators_by_family", {}))
-                    selected_n = selected_map.get(family_id)
-                    if selected_n is not None:
-                        xgb_model_id = "xgb1_regressor" if task_kind == "regression" else "xgb1_classifier"
-                        if xgb_model_id in model_ids:
-                            stage_model_overrides[xgb_model_id] = {
-                                **dict(stage_model_overrides.get(xgb_model_id, {})),
-                                "n_estimators": int(selected_n),
-                            }
-                if latest_rf_calibration is not None:
-                    selected_map = dict(latest_rf_calibration.get("selected_params_by_family", {}))
-                    selected_params = selected_map.get(family_id)
-                    if isinstance(selected_params, dict):
-                        rf_model_id = "randomforest_regressor" if task_kind == "regression" else "randomforest_classifier"
-                        if rf_model_id in model_ids:
-                            stage_model_overrides[rf_model_id] = {
-                                **dict(stage_model_overrides.get(rf_model_id, {})),
-                                **dict(selected_params),
-                            }
-                if latest_mlp_calibration is not None:
-                    selected_map = dict(latest_mlp_calibration.get("selected_params_by_family", {}))
-                    selected_params = selected_map.get(family_id)
-                    if isinstance(selected_params, dict):
-                        mlp_model_id = "mlp_regressor" if task_kind == "regression" else "mlp_classifier"
-                        if mlp_model_id in model_ids:
-                            stage_model_overrides[mlp_model_id] = {
-                                **dict(stage_model_overrides.get(mlp_model_id, {})),
-                                "hidden_layer_sizes": _parse_mlp_hidden_layer_sizes(
-                                    selected_params.get("hidden_layer_sizes", "")
-                                ),
-                                "alpha": float(selected_params["alpha"]),
-                                "early_stopping": False,
-                            }
-                _log(
-                    logger,
-                    f"Stage B model testing for '{family_id}' ({output_mode}) on shortlisted sets: {shortlisted}. "
-                    f"Nested requested={resolved.distillation_nested_sweep}, effective={stage_b_nested_effective}.",
-                )
-                stage_metrics, child_runs = _run_stage(
-                    config,
-                    stage_name="Stage B",
-                    base_overrides=overrides_use,
-                    family_id=family_id,
-                    feature_set_ids=shortlisted,
-                    model_ids=model_ids,
-                    repeat_count=repeat_count,
-                    force_rebuild_intermediary_features=False,
-                    nested_sweep=stage_b_nested_effective,
-                    output_mode=output_mode,
-                    model_param_overrides_by_model_id=stage_model_overrides,
-                    logger=logger,
-                )
-                stage_metrics["stage"] = "advanced"
-                stage_b_rows.append(stage_metrics)
-                model_testing_runs.extend(child_runs)
-
-        if stage_b_rows:
-            stage_b_repeat_metrics = pd.concat(stage_b_rows, ignore_index=True)
-            write_csv(run_dir / "model_testing_repeat_metrics.csv", stage_b_repeat_metrics)
-            write_json(run_dir / "model_testing_child_runs.json", model_testing_runs)
-
-            result_rows: list[pd.DataFrame] = []
-            for family_id in family_sequence:
-                for output_mode in output_modes:
-                    family_task_kind = family_map[family_id].task_kind
-                    family_frame = stage_b_repeat_metrics[
-                        (stage_b_repeat_metrics["target_family"] == family_id)
-                        & (stage_b_repeat_metrics["output_mode"] == output_mode)
-                    ].copy()
-                    result_rows.append(
-                        _aggregate_model_results(family_frame, task_kind=family_task_kind)
-                    )
-            model_testing_results = pd.concat(result_rows, ignore_index=True) if result_rows else pd.DataFrame()
     write_csv(run_dir / "model_testing_results.csv", model_testing_results)
     write_markdown(
         run_dir / "model_testing_report.md",
@@ -1634,6 +1784,17 @@ def run_model_testing_mode(
             repeat_count=repeat_count,
         ),
     )
+
+    saved_bundle_path: Path | None = None
+    if resolved.save_model_configs_after_training:
+        saved_bundle_path = _save_stage_a_model_bundle(
+            config=config,
+            run_dir=run_dir,
+            combo_requests=stage_a_combo_requests,
+            logger=logger,
+        )
+        write_json(saved_bundle_path / "resolved_run_options.json", asdict(resolved))
+        write_json(saved_bundle_path / "resolved_config.json", asdict(config))
 
     summary_lines = [
         "# Model Testing Summary",
@@ -1647,8 +1808,9 @@ def run_model_testing_mode(
         f"- Model-family output modes: {model_family_output_modes}",
         f"- Nested requested: {resolved.distillation_nested_sweep}",
         f"- Nested effective (Stage A): {stage_a_nested_effective_map}",
-        f"- Nested effective (Stage B): {stage_b_nested_effective_map}",
-        f"- Stage B enabled: {resolved.run_advanced_models}",
+        "- Stage B advanced execution: inactive (removed from active model-testing flow).",
+        f"- Save model configs after training: {resolved.save_model_configs_after_training}",
+        f"- Saved model bundle path: {saved_bundle_path if saved_bundle_path is not None else 'not_saved'}",
         f"- Use latest xgb calibration: {resolved.use_latest_xgb_calibration}",
         f"- Use latest rf calibration: {resolved.use_latest_rf_calibration}",
         f"- Use latest mlp calibration: {resolved.use_latest_mlp_calibration}",

@@ -11,24 +11,35 @@ from src.pipeline.config import (
     SUPPORTED_MODEL_TESTING_FAMILIES,
     TargetFamilySpec,
 )
+from src.utils.model_ids import (
+    XGB_CLASSIFIER_MODEL_KIND,
+    XGB_FAMILY_ID,
+    XGB_REGRESSOR_MODEL_KIND,
+    normalize_xgb_family_id,
+    normalize_xgb_model_kind,
+)
 from src.utils.parallel import resolve_max_parallel_workers
 
 
 DEFAULT_CONFIG_PATH = "experiments/teacher_student_distillation_v1.json"
 SUPPORTED_OUTPUT_MODES = {"single_target", "multi_output"}
+SUPPORTED_SAVED_EVAL_MODES = {"reasoning_test_metrics", "success_with_pred_reasoning"}
+SUPPORTED_HQ_EXIT_OVERRIDE_MODES = {"with_override", "both_with_and_without"}
 
 
 MODEL_FAMILY_TO_MODEL_ID: dict[str, dict[str, str]] = {
     "regression": {
         "linear_l2": "ridge",
-        "xgb1": "xgb1_regressor",
+        "linear_svm": "linear_svr_regressor",
+        XGB_FAMILY_ID: XGB_REGRESSOR_MODEL_KIND,
         "mlp": "mlp_regressor",
         "elasticnet": "elasticnet_regressor",
         "randomforest": "randomforest_regressor",
     },
     "classification": {
         "linear_l2": "logreg_classifier",
-        "xgb1": "xgb1_classifier",
+        "linear_svm": "linear_svm_classifier",
+        XGB_FAMILY_ID: XGB_CLASSIFIER_MODEL_KIND,
         "mlp": "mlp_classifier",
         "elasticnet": "elasticnet_logreg_classifier",
         "randomforest": "randomforest_classifier",
@@ -37,7 +48,8 @@ MODEL_FAMILY_TO_MODEL_ID: dict[str, dict[str, str]] = {
 
 DEFAULT_MODEL_FAMILY_OUTPUT_MODES: dict[str, list[str]] = {
     "linear_l2": ["single_target"],
-    "xgb1": ["single_target"],
+    "linear_svm": ["single_target"],
+    XGB_FAMILY_ID: ["single_target"],
     "mlp": ["multi_output"],
     "elasticnet": ["single_target"],
     "randomforest": ["single_target"],
@@ -63,6 +75,10 @@ class RunOverrides:
     output_modes: list[str] | None = None
     model_family_output_modes: dict[str, list[str]] | None = None
     run_advanced_models: bool | None = None
+    save_model_configs_after_training: bool | None = None
+    saved_config_bundle_path: str | None = None
+    saved_eval_mode: str | None = None
+    hq_exit_override_mode: str | None = None
     xgb_calibration_estimators: list[int] | None = None
     use_latest_xgb_calibration: bool | None = None
     rf_calibration_min_samples_leaf: list[int] | None = None
@@ -101,6 +117,10 @@ class ResolvedRunOptions:
     output_modes: list[str]
     model_family_output_modes: dict[str, list[str]]
     run_advanced_models: bool
+    save_model_configs_after_training: bool
+    saved_config_bundle_path: str | None
+    saved_eval_mode: str | None
+    hq_exit_override_mode: str
     xgb_calibration_estimators: list[int]
     use_latest_xgb_calibration: bool
     rf_calibration_min_samples_leaf: list[int]
@@ -168,7 +188,7 @@ def _resolve_model_families(
     run_mode: str,
 ) -> list[str]:
     if run_mode == "xgb_calibration_mode":
-        return ["xgb1"]
+        return [XGB_FAMILY_ID]
     if run_mode == "rf_calibration_mode":
         return ["randomforest"]
     if run_mode == "mlp_calibration_mode":
@@ -176,9 +196,9 @@ def _resolve_model_families(
     if run_mode != "model_testing_mode":
         return []
     requested = (
-        list(overrides.model_families)
+        _normalize_model_families(list(overrides.model_families))
         if overrides.model_families is not None
-        else list(config.model_testing.default_model_families)
+        else _normalize_model_families(list(config.model_testing.default_model_families))
     )
     _require_known_subset(
         requested,
@@ -223,6 +243,34 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
     return output
 
 
+def _normalize_model_families(values: list[str]) -> list[str]:
+    return _dedupe_preserve_order([normalize_xgb_family_id(value) for value in values])
+
+
+def _normalize_model_family_output_modes(
+    mapping: dict[str, list[str]] | None,
+) -> dict[str, list[str]] | None:
+    if mapping is None:
+        return None
+    normalized: dict[str, list[str]] = {}
+    for family_id, modes in mapping.items():
+        key = normalize_xgb_family_id(family_id)
+        if key in normalized:
+            normalized[key] = _dedupe_preserve_order(normalized[key] + list(modes))
+        else:
+            normalized[key] = list(modes)
+    return normalized
+
+
+def _normalize_model_param_overrides(
+    mapping: dict[str, dict[str, object]] | None,
+) -> dict[str, dict[str, object]]:
+    normalized: dict[str, dict[str, object]] = {}
+    for model_id, params in (mapping or {}).items():
+        normalized[normalize_xgb_model_kind(model_id)] = dict(params)
+    return normalized
+
+
 def _resolve_model_family_output_modes(
     *,
     overrides: RunOverrides,
@@ -232,10 +280,14 @@ def _resolve_model_family_output_modes(
     if run_mode != "model_testing_mode":
         return {}
 
+    normalized_override_mapping = _normalize_model_family_output_modes(
+        overrides.model_family_output_modes
+    )
+
     unknown_keys: list[str] = []
-    if overrides.model_family_output_modes is not None:
+    if normalized_override_mapping is not None:
         unknown_keys = [
-            key for key in overrides.model_family_output_modes.keys()
+            key for key in normalized_override_mapping.keys()
             if key not in set(model_families)
         ]
     if unknown_keys:
@@ -245,9 +297,9 @@ def _resolve_model_family_output_modes(
 
     mapping: dict[str, list[str]] = {}
     for family_id in model_families:
-        if overrides.model_family_output_modes is not None:
+        if normalized_override_mapping is not None:
             requested_modes = list(
-                overrides.model_family_output_modes.get(
+                normalized_override_mapping.get(
                     family_id,
                     DEFAULT_MODEL_FAMILY_OUTPUT_MODES.get(family_id, ["single_target"]),
                 )
@@ -265,6 +317,11 @@ def _resolve_model_family_output_modes(
         )
         if not requested_modes:
             raise RuntimeError(f"Model family '{family_id}' must have at least one output mode selected.")
+        if family_id != "mlp" and "multi_output" in requested_modes:
+            raise RuntimeError(
+                f"Model family '{family_id}' cannot use output mode 'multi_output'. "
+                "Only the 'mlp' family supports multi_output."
+            )
         mapping[family_id] = requested_modes
     return mapping
 
@@ -296,7 +353,7 @@ def _resolve_distillation_models(
         if overrides.reasoning_models is None:
             requested_ids = [spec.model_id for spec in available_model_specs]
         else:
-            requested_ids = [value for value in overrides.reasoning_models]
+            requested_ids = [normalize_xgb_model_kind(value) for value in overrides.reasoning_models]
             _require_known_subset(
                 requested_ids,
                 available=available_ids,
@@ -304,7 +361,7 @@ def _resolve_distillation_models(
             )
     elif run_mode == "xgb_calibration_mode":
         requested_ids = [
-            "xgb1_regressor" if target_family.task_kind == "regression" else "xgb1_classifier"
+            XGB_REGRESSOR_MODEL_KIND if target_family.task_kind == "regression" else XGB_CLASSIFIER_MODEL_KIND
         ]
         missing = [model_id for model_id in requested_ids if model_id not in available_ids]
         if missing:
@@ -332,6 +389,8 @@ def _resolve_distillation_models(
                 "mlp_calibration_mode requested model ids that are not configured in distillation_models: "
                 f"{missing}"
             )
+    elif run_mode == "saved_config_evaluation_mode":
+        requested_ids = [spec.model_id for spec in available_model_specs]
     else:
         model_map = MODEL_FAMILY_TO_MODEL_ID[target_family.task_kind]
         requested_ids = [model_map[family] for family in model_families]
@@ -357,7 +416,15 @@ def resolve_run_options(
     overrides_use = overrides or RunOverrides()
 
     run_mode = overrides_use.run_mode or config.defaults.run_mode
-    if run_mode not in {"reproduction_mode", "reasoning_distillation_mode", "model_testing_mode", "xgb_calibration_mode", "rf_calibration_mode", "mlp_calibration_mode"}:
+    if run_mode not in {
+        "reproduction_mode",
+        "reasoning_distillation_mode",
+        "model_testing_mode",
+        "saved_config_evaluation_mode",
+        "xgb_calibration_mode",
+        "rf_calibration_mode",
+        "mlp_calibration_mode",
+    }:
         raise RuntimeError(f"Unsupported run_mode '{run_mode}'.")
 
     target_family_id = overrides_use.target_family or config.defaults.target_family
@@ -384,6 +451,8 @@ def resolve_run_options(
         heldout_evaluation = False
     if run_mode == "mlp_calibration_mode":
         heldout_evaluation = False
+    if run_mode == "saved_config_evaluation_mode":
+        heldout_evaluation = True
 
     available_repository_banks = [spec for spec in config.repository_feature_banks if spec.enabled]
     available_intermediary_banks = [spec for spec in config.intermediary_features if spec.enabled]
@@ -486,6 +555,14 @@ def resolve_run_options(
             overrides=overrides_use,
             run_mode=run_mode,
         )
+        if run_mode == "reasoning_distillation_mode" and "multi_output" in output_modes:
+            selected_model_ids = {spec.model_id for spec in selected_models}
+            mlp_model_ids = {"mlp_regressor", "mlp_classifier"}
+            if not selected_model_ids.issubset(mlp_model_ids):
+                raise RuntimeError(
+                    "output_mode 'multi_output' is only supported when all selected distillation models "
+                    "are MLP models."
+                )
         if run_mode == "reasoning_distillation_mode" and overrides_use.output_modes is None:
             selected_model_ids = {spec.model_id for spec in selected_models}
             mlp_model_ids = {"mlp_regressor", "mlp_classifier"}
@@ -517,13 +594,50 @@ def resolve_run_options(
     if not repeat_cv_with_new_seeds:
         cv_seed_repeat_count = 1
 
-    run_advanced_models = (
-        config.model_testing.run_advanced_models_default
-        if overrides_use.run_advanced_models is None
-        else bool(overrides_use.run_advanced_models)
+    # Deprecated: Stage-B advanced model-testing is inactive.
+    run_advanced_models = False
+
+    save_model_configs_after_training = (
+        config.model_testing.save_model_configs_after_training_default
+        if overrides_use.save_model_configs_after_training is None
+        else bool(overrides_use.save_model_configs_after_training)
     )
-    if run_mode in {"xgb_calibration_mode", "rf_calibration_mode", "mlp_calibration_mode"}:
-        run_advanced_models = False
+    if run_mode != "model_testing_mode":
+        save_model_configs_after_training = False
+
+    saved_config_bundle_path = None
+    saved_eval_mode = None
+    hq_exit_override_mode = "with_override"
+    if run_mode == "saved_config_evaluation_mode":
+        saved_config_bundle_path = (
+            str(overrides_use.saved_config_bundle_path).strip()
+            if overrides_use.saved_config_bundle_path
+            else None
+        )
+        if not saved_config_bundle_path:
+            raise RuntimeError(
+                "saved_config_evaluation_mode requires saved_config_bundle_path."
+            )
+        saved_eval_mode = (
+            str(overrides_use.saved_eval_mode).strip()
+            if overrides_use.saved_eval_mode
+            else "reasoning_test_metrics"
+        )
+        if saved_eval_mode not in SUPPORTED_SAVED_EVAL_MODES:
+            raise RuntimeError(
+                f"Unsupported saved_eval_mode '{saved_eval_mode}'. "
+                f"Supported: {sorted(SUPPORTED_SAVED_EVAL_MODES)}"
+            )
+        hq_exit_override_mode = (
+            str(overrides_use.hq_exit_override_mode).strip()
+            if overrides_use.hq_exit_override_mode
+            else "with_override"
+        )
+        if hq_exit_override_mode not in SUPPORTED_HQ_EXIT_OVERRIDE_MODES:
+            raise RuntimeError(
+                f"Unsupported hq_exit_override_mode '{hq_exit_override_mode}'. "
+                f"Supported: {sorted(SUPPORTED_HQ_EXIT_OVERRIDE_MODES)}"
+            )
 
     xgb_calibration_estimators = (
         [int(value) for value in overrides_use.xgb_calibration_estimators]
@@ -639,6 +753,10 @@ def resolve_run_options(
         output_modes=output_modes,
         model_family_output_modes=model_family_output_modes,
         run_advanced_models=run_advanced_models,
+        save_model_configs_after_training=save_model_configs_after_training,
+        saved_config_bundle_path=saved_config_bundle_path,
+        saved_eval_mode=saved_eval_mode,
+        hq_exit_override_mode=hq_exit_override_mode,
         xgb_calibration_estimators=xgb_calibration_estimators,
         use_latest_xgb_calibration=use_latest_xgb_calibration,
         rf_calibration_min_samples_leaf=rf_calibration_min_samples_leaf,
@@ -650,7 +768,9 @@ def resolve_run_options(
         use_latest_mlp_calibration=use_latest_mlp_calibration,
         mlp_hidden_layer_sizes=mlp_hidden_layer_sizes,
         mlp_alpha=mlp_alpha,
-        xgb_model_param_overrides_by_model_id=dict(overrides_use.xgb_model_param_overrides_by_model_id or {}),
+        xgb_model_param_overrides_by_model_id=_normalize_model_param_overrides(
+            overrides_use.xgb_model_param_overrides_by_model_id
+        ),
         rf_model_param_overrides_by_model_id=dict(overrides_use.rf_model_param_overrides_by_model_id or {}),
         max_parallel_workers=resolve_max_parallel_workers(overrides_use.max_parallel_workers),
     )

@@ -1,0 +1,2 @@
+combo_id,target_family,feature_set_id,model_id,output_mode,task_kind,target_count,primary_metric,primary_value,mae_mean,rmse_mean
+v25_policies__sentence_prose__ridge__single_target__0001,v25_policies,sentence_prose,ridge,single_target,regression,16,r2,0.33768094085388356,0.20835463777155924,0.281661929435451

@@ -4,16 +4,26 @@ import queue
 import threading
 import time
 import tkinter as tk
-from dataclasses import dataclass
+from pathlib import Path
+from dataclasses import dataclass, replace
 from tkinter import scrolledtext, ttk
+from typing import Callable
 
 from src.data.targets import load_target_family
 from src.pipeline.config import ExperimentConfig, load_experiment_config
 from src.pipeline.distillation import run_pipeline
 from src.pipeline.mlp_calibration import load_latest_mlp_calibration
 from src.pipeline.rf_calibration import load_latest_rf_calibration
+from src.pipeline.saved_model_configs import list_saved_bundle_dirs, resolve_saved_bundle_path
 from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides
+from src.utils.model_ids import (
+    XGB_CLASSIFIER_MODEL_KIND,
+    XGB_FAMILY_ID,
+    XGB_FAMILY_UI_LABEL,
+    XGB_REGRESSOR_MODEL_KIND,
+)
+from src.utils.paths import resolve_repo_path
 
 
 @dataclass(frozen=True)
@@ -41,7 +51,10 @@ class LauncherSelections:
     model_families: list[str] | None = None
     output_modes: list[str] | None = None
     model_family_output_modes: dict[str, list[str]] | None = None
-    run_advanced_models: bool | None = None
+    save_model_configs_after_training: bool | None = None
+    saved_config_bundle_path: str | None = None
+    saved_eval_mode: str | None = None
+    hq_exit_override_mode: str | None = None
     xgb_calibration_estimators: list[int] | None = None
     use_latest_xgb_calibration: bool | None = None
     rf_calibration_min_samples_leaf: list[int] | None = None
@@ -53,6 +66,8 @@ class LauncherSelections:
     use_latest_mlp_calibration: bool | None = None
     mlp_hidden_layer_sizes: list[int] | None = None
     mlp_alpha: float | None = None
+    xgb_model_param_overrides_by_model_id: dict[str, dict[str, object]] | None = None
+    max_parallel_workers: int | None = None
 
 
 def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
@@ -73,7 +88,10 @@ def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
         model_families=selections.model_families,
         output_modes=selections.output_modes,
         model_family_output_modes=selections.model_family_output_modes,
-        run_advanced_models=selections.run_advanced_models,
+        save_model_configs_after_training=selections.save_model_configs_after_training,
+        saved_config_bundle_path=selections.saved_config_bundle_path,
+        saved_eval_mode=selections.saved_eval_mode,
+        hq_exit_override_mode=selections.hq_exit_override_mode,
         xgb_calibration_estimators=selections.xgb_calibration_estimators,
         use_latest_xgb_calibration=selections.use_latest_xgb_calibration,
         rf_calibration_min_samples_leaf=selections.rf_calibration_min_samples_leaf,
@@ -85,6 +103,8 @@ def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
         use_latest_mlp_calibration=selections.use_latest_mlp_calibration,
         mlp_hidden_layer_sizes=selections.mlp_hidden_layer_sizes,
         mlp_alpha=selections.mlp_alpha,
+        xgb_model_param_overrides_by_model_id=selections.xgb_model_param_overrides_by_model_id,
+        max_parallel_workers=selections.max_parallel_workers,
     )
 
 
@@ -96,6 +116,17 @@ def apply_launcher_config_overrides(config: ExperimentConfig, selections: Launch
 
 
 class RunLauncher(ttk.Frame):
+    XGB_DEPTH_TEST_DEPTHS: tuple[int, ...] = (3, 5)
+    XGB_DEPTH_TEST_N_ESTIMATORS: int = 320
+    XGB_DEPTH_TEST_REPEAT_COUNT: int = 4
+    XGB_DEPTH_TEST_MAX_PARALLEL_WORKERS: int = 2
+    XGB_DEPTH_TEST_FEATURE_SET_IDS: tuple[str, ...] = (
+        "hq_plus_sentence_prose",
+        "hq_plus_sentence_bundle",
+        "lambda_policies_plus_sentence_prose",
+        "lambda_policies_plus_sentence_bundle",
+    )
+
     def __init__(self, master: tk.Misc | None = None, *, initial_config_path: str = DEFAULT_CONFIG_PATH):
         super().__init__(master, padding=10)
         self.master = master
@@ -128,7 +159,7 @@ class RunLauncher(ttk.Frame):
         self.mt_repeat_cv_var = tk.BooleanVar(value=False)
         self.mt_repeat_count_var = tk.StringVar(value="1")
         self.mt_force_rebuild_var = tk.BooleanVar(value=False)
-        self.mt_run_advanced_var = tk.BooleanVar(value=False)
+        self.mt_save_model_configs_var = tk.BooleanVar(value=False)
         self.mt_embedding_model_var = tk.StringVar(value="sentence-transformers/all-MiniLM-L6-v2")
         self.mt_use_latest_xgb_calibration_var = tk.BooleanVar(value=False)
         self.mt_use_latest_rf_calibration_var = tk.BooleanVar(value=False)
@@ -141,17 +172,23 @@ class RunLauncher(ttk.Frame):
         self.mt_latest_calibration_var = tk.StringVar(value="No calibration loaded")
         self.mt_latest_rf_calibration_var = tk.StringVar(value="No RF calibration loaded")
         self.mt_latest_mlp_calibration_var = tk.StringVar(value="No MLP calibration loaded")
+        self.saved_bundle_root_var = tk.StringVar(value="data/saved_model_configs")
+        self.saved_bundle_selection_var = tk.StringVar(value="")
+        self.saved_eval_mode_var = tk.StringVar(value="reasoning_test_metrics")
+        self.saved_hq_override_mode_var = tk.StringVar(value="with_override")
 
         self.feature_bank_vars: dict[str, tk.BooleanVar] = {}
         self.setup_sentence_bundle_var: tk.BooleanVar | None = None
         self.setup_model_vars: dict[str, tk.BooleanVar] = {
             "linear_l2": tk.BooleanVar(value=True),
-            "xgb1": tk.BooleanVar(value=True),
+            "linear_svm": tk.BooleanVar(value=False),
+            XGB_FAMILY_ID: tk.BooleanVar(value=True),
         }
         self.mt_feature_set_vars: dict[str, tk.BooleanVar] = {}
         self.mt_model_family_vars: dict[str, tk.BooleanVar] = {
             "linear_l2": tk.BooleanVar(value=True),
-            "xgb1": tk.BooleanVar(value=True),
+            "linear_svm": tk.BooleanVar(value=False),
+            XGB_FAMILY_ID: tk.BooleanVar(value=True),
             "mlp": tk.BooleanVar(value=True),
             "elasticnet": tk.BooleanVar(value=False),
             "randomforest": tk.BooleanVar(value=True),
@@ -161,7 +198,11 @@ class RunLauncher(ttk.Frame):
                 "single_target": tk.BooleanVar(value=True),
                 "multi_output": tk.BooleanVar(value=False),
             },
-            "xgb1": {
+            "linear_svm": {
+                "single_target": tk.BooleanVar(value=True),
+                "multi_output": tk.BooleanVar(value=False),
+            },
+            XGB_FAMILY_ID: {
                 "single_target": tk.BooleanVar(value=True),
                 "multi_output": tk.BooleanVar(value=False),
             },
@@ -240,24 +281,30 @@ class RunLauncher(ttk.Frame):
 
         setup_tab_container = ttk.Frame(notebook)
         testing_tab_container = ttk.Frame(notebook)
+        saved_eval_tab_container = ttk.Frame(notebook)
         notebook.add(setup_tab_container, text="Run Setup")
         notebook.add(testing_tab_container, text="Model Testing")
+        notebook.add(saved_eval_tab_container, text="Saved Config Eval")
         self.setup_tab = self._make_scrollable_tab(setup_tab_container)
         self.testing_tab = self._make_scrollable_tab(testing_tab_container)
+        self.saved_eval_tab = self._make_scrollable_tab(saved_eval_tab_container)
 
         self._build_setup_tab()
         self._build_testing_tab()
+        self._build_saved_eval_tab()
 
         actions = ttk.Frame(self)
         actions.grid(row=2, column=0, sticky="ew", pady=(8, 8))
-        actions.columnconfigure(4, weight=1)
+        actions.columnconfigure(8, weight=1)
         ttk.Button(actions, text="Reset Defaults", command=self._reset_defaults).grid(row=0, column=0, sticky="w")
         ttk.Button(actions, text="Run Setup Pipeline", command=self.start_run_setup).grid(row=0, column=1, padx=(8, 0), sticky="w")
         ttk.Button(actions, text="Run Model Testing", command=self.start_model_testing).grid(row=0, column=2, padx=(8, 0), sticky="w")
-        ttk.Button(actions, text="Run XGB Calibration", command=self.start_xgb_calibration).grid(row=0, column=3, padx=(8, 0), sticky="w")
-        ttk.Button(actions, text="Run RF Calibration", command=self.start_rf_calibration).grid(row=0, column=4, padx=(8, 0), sticky="w")
-        ttk.Button(actions, text="Run MLP Calibration", command=self.start_mlp_calibration).grid(row=0, column=5, padx=(8, 0), sticky="w")
-        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=6, sticky="w")
+        ttk.Button(actions, text="Run Saved Config Eval", command=self.start_saved_config_eval).grid(row=0, column=3, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run XGB Calibration", command=self.start_xgb_calibration).grid(row=0, column=4, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run RF Calibration", command=self.start_rf_calibration).grid(row=0, column=5, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run MLP Calibration", command=self.start_mlp_calibration).grid(row=0, column=6, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run XGB Depth Test", command=self.start_xgb_depth_test).grid(row=0, column=7, padx=(8, 0), sticky="w")
+        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=8, sticky="w")
 
         out = ttk.LabelFrame(self, text="Output")
         out.grid(row=3, column=0, sticky="ew", pady=(0, 8))
@@ -337,9 +384,14 @@ class RunLauncher(ttk.Frame):
         ).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(
             models_frame,
-            text="XGB1",
-            variable=self.setup_model_vars["xgb1"],
+            text="Linear SVM/SVR",
+            variable=self.setup_model_vars["linear_svm"],
         ).grid(row=1, column=0, sticky="w")
+        ttk.Checkbutton(
+            models_frame,
+            text=XGB_FAMILY_UI_LABEL,
+            variable=self.setup_model_vars[XGB_FAMILY_ID],
+        ).grid(row=2, column=0, sticky="w")
 
         ttk.Label(
             self.setup_tab,
@@ -378,7 +430,8 @@ class RunLauncher(ttk.Frame):
         for row, (key, label) in enumerate(
             [
                 ("linear_l2", "Linear L2 (Ridge/LogReg)"),
-                ("xgb1", "XGB1"),
+                ("linear_svm", "Linear SVM/SVR"),
+                (XGB_FAMILY_ID, XGB_FAMILY_UI_LABEL),
                 ("mlp", "MLP"),
                 ("elasticnet", "ElasticNet"),
                 ("randomforest", "RandomForest"),
@@ -394,6 +447,7 @@ class RunLauncher(ttk.Frame):
             ttk.Checkbutton(
                 families,
                 variable=self.mt_model_family_output_vars[key]["multi_output"],
+                state="normal" if key == "mlp" else "disabled",
             ).grid(row=row, column=3, sticky="w", padx=(8, 0))
 
         settings = ttk.LabelFrame(self.testing_tab, text="Settings")
@@ -408,7 +462,7 @@ class RunLauncher(ttk.Frame):
         ttk.Label(settings, text="Repeat count").grid(row=0, column=1, sticky="e")
         self.mt_repeat_entry = ttk.Entry(settings, textvariable=self.mt_repeat_count_var, width=8)
         self.mt_repeat_entry.grid(row=0, column=2, sticky="w")
-        ttk.Checkbutton(settings, text="Run advanced models stage", variable=self.mt_run_advanced_var).grid(
+        ttk.Checkbutton(settings, text="Save model configs after training", variable=self.mt_save_model_configs_var).grid(
             row=1, column=0, sticky="w"
         )
         ttk.Checkbutton(
@@ -455,6 +509,61 @@ class RunLauncher(ttk.Frame):
             justify="left",
         ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
+    def _build_saved_eval_tab(self) -> None:
+        self.saved_eval_tab.columnconfigure(1, weight=1)
+        ttk.Label(self.saved_eval_tab, text="Saved bundle root").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self.saved_eval_tab, textvariable=self.saved_bundle_root_var).grid(
+            row=0, column=1, sticky="ew", padx=(8, 8)
+        )
+        ttk.Button(
+            self.saved_eval_tab,
+            text="Refresh Bundles",
+            command=self._refresh_saved_bundle_choices,
+        ).grid(row=0, column=2, sticky="w")
+
+        ttk.Label(self.saved_eval_tab, text="Bundle").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.saved_bundle_combo = ttk.Combobox(
+            self.saved_eval_tab,
+            textvariable=self.saved_bundle_selection_var,
+            state="readonly",
+            width=80,
+        )
+        self.saved_bundle_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(8, 0))
+
+        ttk.Label(self.saved_eval_tab, text="Evaluation mode").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.saved_eval_mode_combo = ttk.Combobox(
+            self.saved_eval_tab,
+            textvariable=self.saved_eval_mode_var,
+            values=("reasoning_test_metrics", "success_with_pred_reasoning"),
+            state="readonly",
+            width=40,
+        )
+        self.saved_eval_mode_combo.grid(row=2, column=1, sticky="w", pady=(8, 0))
+
+        ttk.Label(self.saved_eval_tab, text="HQ override mode").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.saved_hq_override_combo = ttk.Combobox(
+            self.saved_eval_tab,
+            textvariable=self.saved_hq_override_mode_var,
+            values=("with_override", "both_with_and_without"),
+            state="readonly",
+            width=40,
+        )
+        self.saved_hq_override_combo.grid(row=3, column=1, sticky="w", pady=(8, 0))
+
+        ttk.Button(
+            self.saved_eval_tab,
+            text="Run Saved Config Eval",
+            command=self.start_saved_config_eval,
+        ).grid(row=4, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(
+            self.saved_eval_tab,
+            text=(
+                "reasoning_test_metrics: evaluate saved reasoning models on held-out test targets.\n"
+                "success_with_pred_reasoning: evaluate HQ/LLM branches using predicted reasoning + fixed L2 C=5."
+            ),
+            justify="left",
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
     def _load_config_preview(self) -> None:
         config = load_experiment_config(self.config_path_var.get().strip())
         self._loaded_config = config
@@ -473,7 +582,7 @@ class RunLauncher(ttk.Frame):
         self.setup_nested_cv_var.set(False)
         self.mt_repeat_cv_var.set(False)
         self.mt_repeat_count_var.set("1")
-        self.mt_run_advanced_var.set(bool(config.model_testing.run_advanced_models_default))
+        self.mt_save_model_configs_var.set(bool(config.model_testing.save_model_configs_after_training_default))
         self.mt_use_latest_xgb_calibration_var.set(bool(config.model_testing.use_latest_xgb_calibration_default))
         self.mt_use_latest_rf_calibration_var.set(bool(config.model_testing.use_latest_rf_calibration_default))
         self.mt_use_latest_mlp_calibration_var.set(bool(config.model_testing.use_latest_mlp_calibration_default))
@@ -541,12 +650,29 @@ class RunLauncher(ttk.Frame):
         self._sync_setup_mode()
         self._on_setup_repeat_toggle()
         self._on_testing_repeat_toggle()
+        self._refresh_saved_bundle_choices()
 
     def _reset_defaults(self) -> None:
         if self._loaded_config is None:
             return
         self._load_config_preview()
         self.status_var.set("Reset to defaults")
+
+    def _refresh_saved_bundle_choices(self) -> None:
+        root_text = self.saved_bundle_root_var.get().strip() or "data/saved_model_configs"
+        root_path = resolve_repo_path(root_text)
+        if root_text == "data/saved_model_configs":
+            bundles = list_saved_bundle_dirs()
+        elif root_path.exists():
+            bundles = sorted([path for path in root_path.iterdir() if path.is_dir()], key=lambda item: item.name, reverse=True)
+        else:
+            bundles = []
+        values = [str(path) for path in bundles]
+        self.saved_bundle_combo.configure(values=values)
+        current = self.saved_bundle_selection_var.get().strip()
+        if current and current in values:
+            return
+        self.saved_bundle_selection_var.set(values[0] if values else "")
 
     def _rebuild_feature_bank_controls(self) -> None:
         for child in self.setup_features_frame.winfo_children():
@@ -716,11 +842,16 @@ class RunLauncher(ttk.Frame):
                 models.append("ridge")
             if selected_target_family in {"taste_policies", "v25_and_taste"}:
                 models.append("logreg_classifier")
-        if self.setup_model_vars["xgb1"].get():
+        if self.setup_model_vars["linear_svm"].get():
             if selected_target_family in {"v25_policies", "v25_and_taste"}:
-                models.append("xgb1_regressor")
+                models.append("linear_svr_regressor")
             if selected_target_family in {"taste_policies", "v25_and_taste"}:
-                models.append("xgb1_classifier")
+                models.append("linear_svm_classifier")
+        if self.setup_model_vars[XGB_FAMILY_ID].get():
+            if selected_target_family in {"v25_policies", "v25_and_taste"}:
+                models.append(XGB_REGRESSOR_MODEL_KIND)
+            if selected_target_family in {"taste_policies", "v25_and_taste"}:
+                models.append(XGB_CLASSIFIER_MODEL_KIND)
         active_feature_banks = [key for key, var in self.feature_bank_vars.items() if var.get()]
         if self.setup_sentence_bundle_var is not None and self.setup_sentence_bundle_var.get():
             for sentence_bank in ("sentence_prose", "sentence_structured"):
@@ -740,7 +871,10 @@ class RunLauncher(ttk.Frame):
             save_reasoning_predictions=bool(self.save_predictions_var.get()),
             candidate_feature_sets=None,
             model_families=None,
-            run_advanced_models=None,
+            save_model_configs_after_training=None,
+            saved_config_bundle_path=None,
+            saved_eval_mode=None,
+            hq_exit_override_mode=None,
             **common,
         )
 
@@ -775,10 +909,42 @@ class RunLauncher(ttk.Frame):
             model_families=model_families,
             output_modes=output_modes,
             model_family_output_modes=model_family_output_modes,
-            run_advanced_models=bool(self.mt_run_advanced_var.get()),
+            save_model_configs_after_training=bool(self.mt_save_model_configs_var.get()),
+            saved_config_bundle_path=None,
+            saved_eval_mode=None,
+            hq_exit_override_mode=None,
             use_latest_xgb_calibration=bool(self.mt_use_latest_xgb_calibration_var.get()),
             use_latest_rf_calibration=bool(self.mt_use_latest_rf_calibration_var.get()),
             use_latest_mlp_calibration=bool(self.mt_use_latest_mlp_calibration_var.get()),
+            **common,
+        )
+
+    def _saved_eval_selections(self) -> LauncherSelections:
+        common = self._build_common_kwargs()
+        bundle_value = self.saved_bundle_selection_var.get().strip()
+        return LauncherSelections(
+            run_mode="saved_config_evaluation_mode",
+            target_family=self.mt_target_family_var.get().strip(),
+            heldout_evaluation=True,
+            active_feature_banks=None,
+            force_rebuild_intermediary_features=False,
+            reasoning_models=None,
+            embedding_model_name=None,
+            repeat_cv_with_new_seeds=False,
+            cv_seed_repeat_count=1,
+            distillation_nested_sweep=False,
+            save_reasoning_predictions=False,
+            candidate_feature_sets=None,
+            model_families=None,
+            output_modes=None,
+            model_family_output_modes=None,
+            save_model_configs_after_training=False,
+            saved_config_bundle_path=bundle_value or None,
+            saved_eval_mode=self.saved_eval_mode_var.get().strip() or None,
+            hq_exit_override_mode=self.saved_hq_override_mode_var.get().strip() or None,
+            use_latest_xgb_calibration=False,
+            use_latest_rf_calibration=False,
+            use_latest_mlp_calibration=False,
             **common,
         )
 
@@ -800,9 +966,12 @@ class RunLauncher(ttk.Frame):
             distillation_nested_sweep=False,
             save_reasoning_predictions=False,
             candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
-            model_families=["xgb1"],
+            model_families=[XGB_FAMILY_ID],
             output_modes=["single_target"],
-            run_advanced_models=False,
+            save_model_configs_after_training=False,
+            saved_config_bundle_path=None,
+            saved_eval_mode=None,
+            hq_exit_override_mode=None,
             xgb_calibration_estimators=sweep,
             use_latest_xgb_calibration=False,
             use_latest_rf_calibration=False,
@@ -834,7 +1003,10 @@ class RunLauncher(ttk.Frame):
             candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
             model_families=["randomforest"],
             output_modes=["single_target"],
-            run_advanced_models=False,
+            save_model_configs_after_training=False,
+            saved_config_bundle_path=None,
+            saved_eval_mode=None,
+            hq_exit_override_mode=None,
             use_latest_xgb_calibration=False,
             rf_calibration_min_samples_leaf=min_leaf,
             rf_calibration_max_depth=max_depth,
@@ -866,7 +1038,10 @@ class RunLauncher(ttk.Frame):
             candidate_feature_sets=[key for key, var in self.mt_feature_set_vars.items() if var.get()],
             model_families=["mlp"],
             output_modes=["single_target"],
-            run_advanced_models=False,
+            save_model_configs_after_training=False,
+            saved_config_bundle_path=None,
+            saved_eval_mode=None,
+            hq_exit_override_mode=None,
             use_latest_xgb_calibration=False,
             use_latest_rf_calibration=False,
             mlp_calibration_hidden_layer_sizes=hidden_layers,
@@ -874,6 +1049,78 @@ class RunLauncher(ttk.Frame):
             use_latest_mlp_calibration=False,
             **common,
         )
+
+    def _xgb_depth_test_batch_selections(self) -> list[tuple[int, LauncherSelections]]:
+        common = self._build_common_kwargs()
+        batch: list[tuple[int, LauncherSelections]] = []
+        for depth in self.XGB_DEPTH_TEST_DEPTHS:
+            selection = LauncherSelections(
+                run_mode="model_testing_mode",
+                target_family="v25_and_taste",
+                heldout_evaluation=False,
+                active_feature_banks=None,
+                force_rebuild_intermediary_features=False,
+                reasoning_models=None,
+                embedding_model_name=self.mt_embedding_model_var.get().strip() or None,
+                repeat_cv_with_new_seeds=True,
+                cv_seed_repeat_count=self.XGB_DEPTH_TEST_REPEAT_COUNT,
+                distillation_nested_sweep=False,
+                save_reasoning_predictions=False,
+                candidate_feature_sets=list(self.XGB_DEPTH_TEST_FEATURE_SET_IDS),
+                model_families=[XGB_FAMILY_ID],
+                output_modes=["single_target"],
+                model_family_output_modes={XGB_FAMILY_ID: ["single_target"]},
+                save_model_configs_after_training=False,
+                saved_config_bundle_path=None,
+                saved_eval_mode=None,
+                hq_exit_override_mode=None,
+                use_latest_xgb_calibration=False,
+                use_latest_rf_calibration=False,
+                use_latest_mlp_calibration=False,
+                xgb_model_param_overrides_by_model_id={
+                    XGB_REGRESSOR_MODEL_KIND: {
+                        "n_estimators": self.XGB_DEPTH_TEST_N_ESTIMATORS,
+                        "max_depth": depth,
+                    },
+                    XGB_CLASSIFIER_MODEL_KIND: {
+                        "n_estimators": self.XGB_DEPTH_TEST_N_ESTIMATORS,
+                        "max_depth": depth,
+                    },
+                },
+                max_parallel_workers=self.XGB_DEPTH_TEST_MAX_PARALLEL_WORKERS,
+                **common,
+            )
+            batch.append((depth, selection))
+        return batch
+
+    @staticmethod
+    def _run_overrides_once(
+        config: ExperimentConfig,
+        overrides: RunOverrides,
+        logger: Callable[[str], None] | None,
+    ) -> Path:
+        return run_pipeline(config, overrides, logger=logger)
+
+    @staticmethod
+    def _execute_xgb_depth_batch(
+        *,
+        config: ExperimentConfig,
+        batch: list[tuple[int, LauncherSelections]],
+        logger: Callable[[str], None] | None = None,
+        run_once: Callable[[ExperimentConfig, RunOverrides, Callable[[str], None] | None], Path] | None = None,
+    ) -> list[str]:
+        run_once_fn = run_once or RunLauncher._run_overrides_once
+        total = len(batch)
+        completed_runs: list[str] = []
+        for index, (depth, selections) in enumerate(batch, start=1):
+            if logger is not None:
+                logger(f"XGB depth test run {index}/{total}: max_depth={depth} starting.")
+            overrides = selections_to_overrides(selections)
+            run_dir = run_once_fn(config, overrides, logger)
+            if logger is not None:
+                logger(f"XGB depth test run {index}/{total}: max_depth={depth} complete. Artifacts: {run_dir}")
+            completed_runs.append(f"max_depth={depth}: {run_dir}")
+        return completed_runs
 
     def _append_log(self, message: str) -> None:
         self.log_text.configure(state="normal")
@@ -913,6 +1160,22 @@ class RunLauncher(ttk.Frame):
             self._append_log(f"ERROR: {exc}")
             return
         self._start_worker(selections, "Starting model-testing pipeline.")
+
+    def start_saved_config_eval(self) -> None:
+        try:
+            selections = self._saved_eval_selections()
+            bundle_raw = (selections.saved_config_bundle_path or "").strip()
+            if not bundle_raw:
+                raise ValueError("Select a saved model config bundle.")
+            resolved_bundle = resolve_saved_bundle_path(bundle_raw)
+            if not resolved_bundle.exists():
+                raise ValueError(f"Saved bundle path does not exist: {resolved_bundle}")
+            selections = replace(selections, saved_config_bundle_path=str(resolved_bundle))
+        except ValueError as exc:
+            self.status_var.set("Invalid input")
+            self._append_log(f"ERROR: {exc}")
+            return
+        self._start_worker(selections, "Starting saved-config evaluation pipeline.")
 
     def start_xgb_calibration(self) -> None:
         try:
@@ -959,6 +1222,23 @@ class RunLauncher(ttk.Frame):
             return
         self._start_worker(selections, "Starting MLP calibration pipeline.")
 
+    def start_xgb_depth_test(self) -> None:
+        try:
+            batch = self._xgb_depth_test_batch_selections()
+            if not batch:
+                raise ValueError("XGB depth test batch is empty.")
+        except ValueError as exc:
+            self.status_var.set("Invalid input")
+            self._append_log(f"ERROR: {exc}")
+            return
+        self._start_batch_worker(
+            batch,
+            start_message=(
+                "Starting XGB depth test batch (locked preset: "
+                "v25_and_taste, HQ/Lambda prose+bundle, depths=3,5, repeats=4, n_estimators=320)."
+            ),
+        )
+
     def _start_worker(self, selections: LauncherSelections, start_message: str) -> None:
         if self.worker is not None and self.worker.is_alive():
             self.status_var.set("Run already in progress")
@@ -979,6 +1259,38 @@ class RunLauncher(ttk.Frame):
                 self.queue.put(("error", str(exc)))
                 return
             self.queue.put(("done", str(run_dir)))
+
+        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker.start()
+
+    def _start_batch_worker(
+        self,
+        batch: list[tuple[int, LauncherSelections]],
+        *,
+        start_message: str,
+    ) -> None:
+        if self.worker is not None and self.worker.is_alive():
+            self.status_var.set("Run already in progress")
+            return
+        self.status_var.set("Running")
+        self.output_path_var.set("")
+        self._append_log(start_message)
+        self._run_started_monotonic = time.monotonic()
+        self._last_heartbeat_monotonic = self._run_started_monotonic
+
+        def worker() -> None:
+            try:
+                config_path = batch[0][1].config_path
+                config = load_experiment_config(config_path)
+                completed_runs = self._execute_xgb_depth_batch(
+                    config=config,
+                    batch=batch,
+                    logger=lambda msg: self.queue.put(("log", msg)),
+                )
+                self.queue.put(("done", "\n".join(completed_runs)))
+            except Exception as exc:  # pragma: no cover - UI path
+                self.queue.put(("error", str(exc)))
+                return
 
         self.worker = threading.Thread(target=worker, daemon=True)
         self.worker.start()

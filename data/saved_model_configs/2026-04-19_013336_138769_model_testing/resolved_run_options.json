@@ -1,0 +1,124 @@
+{
+  "config_path": "experiments/teacher_student_distillation_v1.json",
+  "run_mode": "model_testing_mode",
+  "target_family": {
+    "family_id": "v25_policies",
+    "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_train.csv",
+    "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_test.csv",
+    "source_id_column": "founder_uuid",
+    "target_id_column": "founder_uuid",
+    "target_prefixes": [
+      "v25_"
+    ],
+    "task_kind": "regression",
+    "scale_min": 0.0,
+    "scale_max": 1.0,
+    "enabled_by_default": true
+  },
+  "heldout_evaluation": false,
+  "active_feature_banks": [
+    "sentence_prose"
+  ],
+  "force_rebuild_intermediary_features": false,
+  "repository_feature_banks": [],
+  "intermediary_features": [
+    {
+      "feature_bank_id": "sentence_prose",
+      "kind": "sentence_transformer_prose_v1",
+      "enabled": true,
+      "embedding_model_name": "sentence-transformers/all-MiniLM-L6-v2"
+    }
+  ],
+  "distillation_feature_sets": [
+    {
+      "feature_set_id": "sentence_prose",
+      "feature_bank_ids": [
+        "sentence_prose"
+      ]
+    }
+  ],
+  "distillation_models": [
+    {
+      "model_id": "ridge",
+      "kind": "ridge",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    }
+  ],
+  "repeat_cv_with_new_seeds": false,
+  "cv_seed_repeat_count": 1,
+  "distillation_nested_sweep": false,
+  "save_reasoning_predictions": true,
+  "candidate_feature_sets": [
+    "sentence_prose"
+  ],
+  "model_families": [
+    "linear_l2"
+  ],
+  "output_modes": [
+    "single_target"
+  ],
+  "model_family_output_modes": {
+    "linear_l2": [
+      "single_target"
+    ]
+  },
+  "run_advanced_models": false,
+  "save_model_configs_after_training": true,
+  "saved_config_bundle_path": null,
+  "saved_eval_mode": null,
+  "hq_exit_override_mode": "with_override",
+  "xgb_calibration_estimators": [
+    40,
+    80,
+    120,
+    180,
+    240,
+    320
+  ],
+  "use_latest_xgb_calibration": false,
+  "rf_calibration_min_samples_leaf": [
+    2,
+    3,
+    4,
+    5
+  ],
+  "rf_calibration_max_depth": [
+    null,
+    10,
+    20,
+    30
+  ],
+  "rf_calibration_max_features": [
+    "sqrt",
+    0.5
+  ],
+  "use_latest_rf_calibration": false,
+  "mlp_calibration_hidden_layer_sizes": [
+    [
+      8
+    ],
+    [
+      16
+    ],
+    [
+      32
+    ],
+    [
+      16,
+      8
+    ]
+  ],
+  "mlp_calibration_alpha": [
+    0.001,
+    0.01,
+    0.1
+  ],
+  "use_latest_mlp_calibration": false,
+  "mlp_hidden_layer_sizes": null,
+  "mlp_alpha": null,
+  "xgb_model_param_overrides_by_model_id": {},
+  "rf_model_param_overrides_by_model_id": {},
+  "max_parallel_workers": 1
+}

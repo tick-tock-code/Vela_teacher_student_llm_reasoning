@@ -238,8 +238,15 @@
       ]
     },
     {
-      "model_id": "xgb1_regressor",
-      "kind": "xgb1_regressor",
+      "model_id": "linear_svr_regressor",
+      "kind": "linear_svr_regressor",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    },
+    {
+      "model_id": "xgb3_regressor",
+      "kind": "xgb3_regressor",
       "supported_task_kinds": [
         "regression"
       ]
@@ -252,8 +259,15 @@
       ]
     },
     {
-      "model_id": "xgb1_classifier",
-      "kind": "xgb1_classifier",
+      "model_id": "linear_svm_classifier",
+      "kind": "linear_svm_classifier",
+      "supported_task_kinds": [
+        "classification"
+      ]
+    },
+    {
+      "model_id": "xgb3_classifier",
+      "kind": "xgb3_classifier",
       "supported_task_kinds": [
         "classification"
       ]
@@ -303,7 +317,7 @@
   ],
   "reproduction": {
     "outer_cv": {
-      "n_splits": 3,
+      "n_splits": 5,
       "shuffle": true,
       "random_state": 42
     },
@@ -477,11 +491,12 @@
     ],
     "default_model_families": [
       "linear_l2",
-      "xgb1",
+      "linear_svm",
+      "xgb3",
       "mlp",
       "randomforest"
     ],
-    "run_advanced_models_default": false,
+    "save_model_configs_after_training_default": false,
     "screening_repeat_cv_count": 3,
     "screening_score_delta": 0.005,
     "max_recommended_feature_sets": 3,

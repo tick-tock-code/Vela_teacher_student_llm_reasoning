@@ -8,6 +8,7 @@ import pandas as pd
 from src.evaluation.metrics import binary_classification_metrics, select_f05_threshold
 from src.pipeline.config import DistillationModelSpec
 from src.student.models import build_downstream_classifier
+from src.utils.model_ids import XGB_CLASSIFIER_MODEL_KIND, normalize_xgb_model_kind
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ def _fill_missing(
     *,
     model_kind: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if model_kind == "xgb1_classifier":
+    if normalize_xgb_model_kind(model_kind) == XGB_CLASSIFIER_MODEL_KIND:
         return train_df.fillna(0.0), test_df.fillna(0.0)
     fill_values = train_df.mean(numeric_only=True)
     return (

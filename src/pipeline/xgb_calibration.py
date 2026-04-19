@@ -20,6 +20,7 @@ from src.pipeline.config import ExperimentConfig
 from src.pipeline.run_options import RunOverrides, resolve_run_options
 from src.student.models import build_reasoning_classifier, build_reasoning_regressor
 from src.utils.artifact_io import read_json, timestamped_run_dir, write_json, write_markdown
+from src.utils.model_ids import XGB_CLASSIFIER_MODEL_KIND, XGB_REGRESSOR_MODEL_KIND
 from src.utils.paths import DOCS_DIR, RUNS_DIR
 
 
@@ -162,7 +163,7 @@ def _compute_primary_metrics(
             seed = random_state + target_index + fold_offset
             if task_kind == "regression":
                 model = build_reasoning_regressor(
-                    "xgb1_regressor",
+                    XGB_REGRESSOR_MODEL_KIND,
                     random_state=seed,
                     param_overrides={"n_estimators": n_estimators},
                 )
@@ -172,7 +173,7 @@ def _compute_primary_metrics(
                 oof[split.test_idx] = preds
             else:
                 model = build_reasoning_classifier(
-                    "xgb1_classifier",
+                    XGB_CLASSIFIER_MODEL_KIND,
                     random_state=seed,
                     param_overrides={"n_estimators": n_estimators},
                 )
