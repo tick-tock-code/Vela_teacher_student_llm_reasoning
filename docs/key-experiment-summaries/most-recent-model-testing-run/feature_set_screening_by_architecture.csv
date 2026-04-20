@@ -1,2 +1,3 @@
 target_family,output_mode,model_architecture,model_ids,feature_set_id,rank,primary_metric,primary_mean,primary_std,screen_score,recommended_take_forward,r2_mean,rmse_mean,mae_mean,f0_5_mean,roc_auc_mean,pr_auc_mean
-v25_policies,single_target,linear_l2,ridge,sentence_prose,1,r2,0.341054448668608,0.0,0.341054448668608,True,0.341054448668608,0.2836560922012912,0.20114997408248064,,,
+v25_policies,multi_output,mlp,mlp_regressor,lambda_policies_plus_sentence_bundle,1,r2,0.41694573501452487,0.0,0.41694573501452487,True,0.41694573501452487,0.2659969359569508,0.1709738727460321,,,
+v25_policies,multi_output,mlp,mlp_regressor,hq_plus_sentence_bundle,2,r2,0.35020612389222466,0.0,0.35020612389222466,False,0.35020612389222466,0.28025222385775256,0.19137561099182968,,,

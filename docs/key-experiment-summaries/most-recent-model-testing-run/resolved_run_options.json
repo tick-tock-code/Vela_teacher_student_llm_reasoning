@@ -265,9 +265,16 @@
   "model_family_output_modes": {},
   "run_advanced_models": false,
   "save_model_configs_after_training": false,
-  "saved_config_bundle_path": "data/saved_model_configs/2026-04-19_013336_138769_model_testing",
-  "saved_eval_mode": "success_with_pred_reasoning",
-  "hq_exit_override_mode": "both_with_and_without",
+  "saved_config_bundle_path": null,
+  "saved_eval_mode": "full_transfer_report",
+  "saved_eval_combo_ids": null,
+  "saved_eval_combo_refs": [
+    "data/saved_model_configs/2026-04-19_195413_226932_model_testing::v25_policies__lambda_policies_plus_sentence_bundle__ridge__single_target__0003",
+    "data/saved_model_configs/2026-04-19_195413_226932_model_testing::v25_policies__lambda_policies_plus_sentence_bundle__xgb3_regressor__single_target__0004",
+    "data/saved_model_configs/2026-04-20_010135_130404_model_testing::v25_policies__lambda_policies_plus_sentence_bundle__mlp_regressor__multi_output__0002"
+  ],
+  "saved_eval_per_target_best_r2": false,
+  "hq_exit_override_mode": "with_override",
   "xgb_calibration_estimators": [
     40,
     80,

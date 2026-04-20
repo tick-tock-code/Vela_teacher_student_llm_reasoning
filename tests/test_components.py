@@ -4,14 +4,17 @@ from pathlib import Path
 import shutil
 import sys
 import tkinter as tk
+from types import SimpleNamespace
 import unittest
 import uuid
+from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.feature_repository import load_feature_repository_splits, load_repository_feature_bank
+from src.data.feature_repository import LoadedFeatureRepositorySplits, load_feature_repository_splits, load_repository_feature_bank
 from src.data.targets import load_target_family
 from src.data.splits import build_stratified_reasoning_cv_splits
 from src.gui.run_launcher import RunLauncher, LauncherSelections, selections_to_overrides
@@ -35,6 +38,8 @@ from src.pipeline.model_testing import (
 from src.pipeline.config import FeatureSetSpec, load_experiment_config
 from src.pipeline.run_distillation import parse_run_overrides
 from src.pipeline.run_options import RunOverrides, resolve_run_options
+import src.pipeline.saved_config_evaluation as saved_eval
+from src.pipeline.saved_config_evaluation import run_saved_config_evaluation_mode
 from src.pipeline.mlp_calibration import load_latest_mlp_calibration
 from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 from src.pipeline.rf_calibration import load_latest_rf_calibration
@@ -880,6 +885,13 @@ class ComponentTests(unittest.TestCase):
                 "data/saved_model_configs/example_run",
                 "--saved-eval-mode",
                 "reasoning_test_metrics",
+                "--saved-eval-combo-ids",
+                "combo_alpha",
+                "combo_beta",
+                "--saved-eval-combo-refs",
+                "bundle_a::combo_alpha",
+                "bundle_b::combo_beta",
+                "--saved-eval-per-target-best-r2",
                 "--hq-exit-override-mode",
                 "both_with_and_without",
             ]
@@ -887,7 +899,526 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(overrides.run_mode, "saved_config_evaluation_mode")
         self.assertEqual(overrides.saved_config_bundle_path, "data/saved_model_configs/example_run")
         self.assertEqual(overrides.saved_eval_mode, "reasoning_test_metrics")
+        self.assertEqual(overrides.saved_eval_combo_ids, ["combo_alpha", "combo_beta"])
+        self.assertEqual(
+            overrides.saved_eval_combo_refs,
+            ["bundle_a::combo_alpha", "bundle_b::combo_beta"],
+        )
+        self.assertTrue(overrides.saved_eval_per_target_best_r2)
         self.assertEqual(overrides.hq_exit_override_mode, "both_with_and_without")
+
+    def test_cli_parsing_supports_full_transfer_saved_eval_mode(self) -> None:
+        overrides = parse_run_overrides(
+            [
+                "--config",
+                "experiments/teacher_student_distillation_v1.json",
+                "--run-mode",
+                "saved_config_evaluation_mode",
+                "--saved-eval-mode",
+                "full_transfer_report",
+                "--saved-eval-combo-refs",
+                "bundle_a::combo_ridge",
+                "bundle_b::combo_xgb",
+                "bundle_c::combo_mlp",
+            ]
+        )
+        self.assertEqual(overrides.saved_eval_mode, "full_transfer_report")
+        self.assertEqual(
+            overrides.saved_eval_combo_refs,
+            ["bundle_a::combo_ridge", "bundle_b::combo_xgb", "bundle_c::combo_mlp"],
+        )
+
+    def test_saved_config_eval_mode_resolves_combo_ids(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="saved_config_evaluation_mode",
+                saved_config_bundle_path="data/saved_model_configs/example_run",
+                saved_eval_mode="reasoning_test_metrics",
+                saved_eval_combo_ids=["combo_one", "combo_two"],
+            ),
+        )
+        self.assertEqual(resolved.saved_eval_combo_ids, ["combo_one", "combo_two"])
+
+    def test_saved_config_eval_mode_accepts_combo_refs_without_bundle_path(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="saved_config_evaluation_mode",
+                saved_eval_mode="reasoning_test_metrics",
+                saved_eval_combo_refs=["bundle_a::combo_one", "bundle_b::combo_two"],
+                saved_eval_per_target_best_r2=True,
+            ),
+        )
+        self.assertIsNone(resolved.saved_config_bundle_path)
+        self.assertEqual(
+            resolved.saved_eval_combo_refs,
+            ["bundle_a::combo_one", "bundle_b::combo_two"],
+        )
+        self.assertTrue(resolved.saved_eval_per_target_best_r2)
+
+    def test_saved_config_eval_mode_rejects_unknown_combo_ids(self) -> None:
+        root = _workspace_temp_dir()
+        try:
+            bundle_dir = root / "saved_bundle"
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            (bundle_dir / "bundle_manifest.json").write_text(
+                (
+                    "{"
+                    '"bundle_version":1,'
+                    '"combos":[{"combo_id":"known_combo","target_family":"v25_policies"}]'
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+            config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+            with self.assertRaises(RuntimeError):
+                run_saved_config_evaluation_mode(
+                    config,
+                    RunOverrides(
+                        run_mode="saved_config_evaluation_mode",
+                        saved_config_bundle_path=str(bundle_dir),
+                        saved_eval_mode="reasoning_test_metrics",
+                        saved_eval_combo_ids=["unknown_combo"],
+                    ),
+                )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_saved_config_eval_mode_filters_to_selected_combos(self) -> None:
+        root = _workspace_temp_dir()
+        try:
+            bundle_dir = root / "saved_bundle"
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            (bundle_dir / "bundle_manifest.json").write_text(
+                (
+                    "{"
+                    '"bundle_version":1,'
+                    '"combos":['
+                    '{"combo_id":"combo_a","target_family":"v25_policies","feature_set_id":"sentence_prose","model_id":"ridge","output_mode":"single_target"},'
+                    '{"combo_id":"combo_b","target_family":"v25_policies","feature_set_id":"sentence_bundle","model_id":"ridge","output_mode":"single_target"}'
+                    "]"
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+            config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+            captured: list[list[dict[str, object]]] = []
+
+            def _fake_eval_reasoning(*, combos, **_kwargs):
+                captured.append([dict(item) for item in combos])
+                return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+            with patch(
+                "src.pipeline.saved_config_evaluation._load_feature_sets_for_bundle",
+                return_value=({}, None, {}),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._evaluate_reasoning_test_metrics",
+                side_effect=_fake_eval_reasoning,
+            ):
+                run_saved_config_evaluation_mode(
+                    config,
+                    RunOverrides(
+                        run_mode="saved_config_evaluation_mode",
+                        saved_config_bundle_path=str(bundle_dir),
+                        saved_eval_mode="reasoning_test_metrics",
+                        saved_eval_combo_ids=["combo_b"],
+                    ),
+                )
+            self.assertEqual(len(captured), 1)
+            self.assertEqual([row["combo_id"] for row in captured[0]], ["combo_b"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_saved_config_eval_mode_accepts_cross_bundle_combo_refs(self) -> None:
+        root = _workspace_temp_dir()
+        try:
+            bundle_a = root / "bundle_a"
+            bundle_b = root / "bundle_b"
+            bundle_a.mkdir(parents=True, exist_ok=True)
+            bundle_b.mkdir(parents=True, exist_ok=True)
+            (bundle_a / "bundle_manifest.json").write_text(
+                (
+                    "{"
+                    '"bundle_version":1,'
+                    '"source_run_dir":"run_a",'
+                    '"combos":['
+                    '{"combo_id":"combo_a","target_family":"v25_policies","feature_set_id":"sentence_prose","model_id":"ridge","output_mode":"single_target","task_kind":"regression"}'
+                    "]"
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+            (bundle_b / "bundle_manifest.json").write_text(
+                (
+                    "{"
+                    '"bundle_version":1,'
+                    '"source_run_dir":"run_b",'
+                    '"combos":['
+                    '{"combo_id":"combo_b","target_family":"v25_policies","feature_set_id":"sentence_bundle","model_id":"mlp_regressor","output_mode":"multi_output","task_kind":"regression"}'
+                    "]"
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+            config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+            captured: list[list[dict[str, object]]] = []
+
+            def _fake_eval_reasoning(*, combos, **_kwargs):
+                captured.append([dict(item) for item in combos])
+                return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+            with patch(
+                "src.pipeline.saved_config_evaluation._load_feature_sets_for_bundle",
+                return_value=({}, None, {}),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._evaluate_reasoning_test_metrics",
+                side_effect=_fake_eval_reasoning,
+            ):
+                run_saved_config_evaluation_mode(
+                    config,
+                    RunOverrides(
+                        run_mode="saved_config_evaluation_mode",
+                        saved_eval_mode="reasoning_test_metrics",
+                        saved_eval_combo_refs=[
+                            f"{bundle_a}::combo_a",
+                            f"{bundle_b}::combo_b",
+                        ],
+                        saved_eval_per_target_best_r2=True,
+                    ),
+                )
+            self.assertEqual(len(captured), 1)
+            loaded = captured[0]
+            self.assertEqual({row["combo_id"] for row in loaded}, {"combo_a", "combo_b"})
+            self.assertEqual({Path(str(row["bundle_dir"])) for row in loaded}, {bundle_a, bundle_b})
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_saved_config_eval_mode_full_transfer_requires_combo_refs(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        with self.assertRaises(RuntimeError):
+            resolve_run_options(
+                config,
+                RunOverrides(
+                    run_mode="saved_config_evaluation_mode",
+                    saved_config_bundle_path="data/saved_model_configs/example_run",
+                    saved_eval_mode="full_transfer_report",
+                ),
+            )
+
+    def test_saved_config_eval_mode_full_transfer_accepts_combo_refs(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="saved_config_evaluation_mode",
+                saved_eval_mode="full_transfer_report",
+                saved_eval_combo_refs=[
+                    "bundle_a::combo_ridge",
+                    "bundle_b::combo_xgb",
+                    "bundle_c::combo_mlp",
+                ],
+            ),
+        )
+        self.assertEqual(resolved.saved_eval_mode, "full_transfer_report")
+        self.assertEqual(
+            resolved.saved_eval_combo_refs,
+            ["bundle_a::combo_ridge", "bundle_b::combo_xgb", "bundle_c::combo_mlp"],
+        )
+
+    def test_full_transfer_combo_validation_enforces_v25_lambda_bundle_contract(self) -> None:
+        combos = [
+            {
+                "combo_id": "combo_ridge",
+                "target_family": "v25_policies",
+                "feature_set_id": "lambda_policies_plus_sentence_bundle",
+                "task_kind": "regression",
+                "model_id": "ridge",
+            },
+            {
+                "combo_id": "combo_xgb",
+                "target_family": "v25_policies",
+                "feature_set_id": "hq_plus_sentence_bundle",
+                "task_kind": "regression",
+                "model_id": "xgb3_regressor",
+            },
+            {
+                "combo_id": "combo_mlp",
+                "target_family": "v25_policies",
+                "feature_set_id": "lambda_policies_plus_sentence_bundle",
+                "task_kind": "regression",
+                "model_id": "mlp_regressor",
+            },
+        ]
+        with self.assertRaises(RuntimeError):
+            saved_eval._validate_full_transfer_combo_refs(combos)
+
+    def test_build_best_r2_assignment_prefers_ridge_on_tie(self) -> None:
+        combos = [
+            {
+                "combo_id": "ridge_combo",
+                "model_id": "ridge",
+                "target_family": "v25_policies",
+                "feature_set_id": "lambda_policies_plus_sentence_bundle",
+                "output_mode": "single_target",
+                "task_kind": "regression",
+                "bundle_dir": "bundle_ridge",
+                "source_run_dir": "run_ridge",
+            },
+            {
+                "combo_id": "xgb_combo",
+                "model_id": "xgb3_regressor",
+                "target_family": "v25_policies",
+                "feature_set_id": "lambda_policies_plus_sentence_bundle",
+                "output_mode": "single_target",
+                "task_kind": "regression",
+                "bundle_dir": "bundle_xgb",
+                "source_run_dir": "run_xgb",
+            },
+            {
+                "combo_id": "mlp_combo",
+                "model_id": "mlp_regressor",
+                "target_family": "v25_policies",
+                "feature_set_id": "lambda_policies_plus_sentence_bundle",
+                "output_mode": "multi_output",
+                "task_kind": "regression",
+                "bundle_dir": "bundle_mlp",
+                "source_run_dir": "run_mlp",
+            },
+        ]
+        target_family = SimpleNamespace(
+            family_id="v25_policies",
+            target_columns=["v25_example_target"],
+        )
+
+        def _fake_source_metrics(combo: dict[str, object]) -> pd.DataFrame:
+            model_id = str(combo["model_id"])
+            if model_id in {"ridge", "xgb3_regressor"}:
+                r2_value = 0.55
+            else:
+                r2_value = 0.40
+            return pd.DataFrame(
+                {
+                    "target_family": ["v25_policies"],
+                    "feature_set_id": ["lambda_policies_plus_sentence_bundle"],
+                    "model_id": [model_id],
+                    "output_mode": [str(combo["output_mode"])],
+                    "target_id": ["v25_example_target"],
+                    "split_id": ["oof_overall"],
+                    "stage": ["screening"],
+                    "r2": [r2_value],
+                }
+            )
+
+        with patch(
+            "src.pipeline.saved_config_evaluation._load_source_cv_metrics_for_combo",
+            side_effect=_fake_source_metrics,
+        ):
+            assignment, assignment_frame = saved_eval._build_best_r2_assignment(
+                combos=combos,
+                target_family=target_family,
+                tie_break_model_priority=saved_eval.FULL_TRANSFER_TIEBREAK_PRIORITY,
+            )
+
+        self.assertEqual(assignment["v25_example_target"]["model_id"], "ridge")
+        self.assertEqual(
+            assignment_frame.loc[0, "selected_model_id"],
+            "ridge",
+        )
+
+    def test_full_transfer_success_branch_matrix_has_12_rows(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        train_ids = [f"tr_{idx}" for idx in range(10)]
+        test_ids = [f"te_{idx}" for idx in range(6)]
+        labels = pd.DataFrame(
+            {
+                "founder_uuid": train_ids + test_ids,
+                "split": ["train"] * len(train_ids) + ["test"] * len(test_ids),
+                "success": [0, 1] * 8,
+            }
+        )
+        repository_splits = LoadedFeatureRepositorySplits(
+            labels_frame=labels,
+            train_ids=train_ids,
+            test_ids=test_ids,
+            train_labels=labels[labels["split"] == "train"].reset_index(drop=True),
+            test_labels=labels[labels["split"] == "test"].reset_index(drop=True),
+        )
+
+        def _bank_frame(ids: list[str], *, include_exit: bool) -> pd.DataFrame:
+            frame = pd.DataFrame(
+                {
+                    "founder_uuid": ids,
+                    "f1": np.linspace(0.0, 1.0, len(ids)),
+                    "f2": np.linspace(1.0, 2.0, len(ids)),
+                }
+            )
+            if include_exit:
+                frame["exit_count"] = np.where(np.arange(len(ids)) % 3 == 0, 1, 0)
+            return frame
+
+        repository_banks = {
+            "hq_baseline": SimpleNamespace(
+                public_frame=_bank_frame(train_ids, include_exit=True),
+                private_frame=_bank_frame(test_ids, include_exit=True),
+                binary_feature_columns=["f2"],
+            ),
+            "llm_engineering": SimpleNamespace(
+                public_frame=_bank_frame(train_ids, include_exit=False),
+                private_frame=_bank_frame(test_ids, include_exit=False),
+                binary_feature_columns=[],
+            ),
+        }
+        prediction_columns = [f"v25_p{idx}" for idx in range(1, 5)]
+        predictions_by_model_set = {}
+        for model_set_id in ["ridge", "xgb3_regressor", "mlp_regressor", "combined_best"]:
+            pred_train = pd.DataFrame({col: np.linspace(0.2, 0.8, len(train_ids)) for col in prediction_columns})
+            pred_test = pd.DataFrame({col: np.linspace(0.3, 0.7, len(test_ids)) for col in prediction_columns})
+            predictions_by_model_set[model_set_id] = (pred_train, pred_test)
+
+        fake_protocol = {
+            "selected_c_final": 5.0,
+            "selected_c_oof_mean": 2.5,
+            "test_metrics": {
+                "roc_auc": 0.7,
+                "pr_auc": 0.6,
+                "precision": 0.5,
+                "recall": 0.4,
+                "f0_5": 0.45,
+                "brier": 0.2,
+                "precision_at_01": 0.5,
+                "precision_at_05": 0.5,
+                "precision_at_10": 0.5,
+                "threshold": 0.5,
+            },
+        }
+
+        with patch(
+            "src.pipeline.saved_config_evaluation.run_nested_l2_success_protocol",
+            return_value=fake_protocol,
+        ):
+            metrics = saved_eval._evaluate_success_transfer(
+                config=config,
+                predictions_by_model_set=predictions_by_model_set,
+                repository_splits=repository_splits,
+                repository_banks=repository_banks,
+            )
+        self.assertEqual(len(metrics), 12)
+        self.assertEqual(
+            sorted(metrics["branch_id"].unique().tolist()),
+            sorted(["pred_reasoning_only", "hq_plus_pred_reasoning", "llm_engineering_plus_pred_reasoning"]),
+        )
+
+    def test_saved_config_eval_full_transfer_writes_expected_artifacts(self) -> None:
+        root = _workspace_temp_dir()
+        try:
+            bundle_dir = root / "bundle"
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            (bundle_dir / "bundle_manifest.json").write_text(
+                (
+                    "{"
+                    '"bundle_version":1,'
+                    '"source_run_dir":"run_source",'
+                    '"combos":['
+                    '{"combo_id":"combo_ridge","target_family":"v25_policies","feature_set_id":"lambda_policies_plus_sentence_bundle","task_kind":"regression","model_id":"ridge","output_mode":"single_target"},'
+                    '{"combo_id":"combo_xgb","target_family":"v25_policies","feature_set_id":"lambda_policies_plus_sentence_bundle","task_kind":"regression","model_id":"xgb3_regressor","output_mode":"single_target"},'
+                    '{"combo_id":"combo_mlp","target_family":"v25_policies","feature_set_id":"lambda_policies_plus_sentence_bundle","task_kind":"regression","model_id":"mlp_regressor","output_mode":"multi_output"}'
+                    "]"
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+            config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+
+            with patch(
+                "src.pipeline.saved_config_evaluation._load_feature_sets_for_bundle",
+                return_value=({}, None, {}),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._build_prediction_frames_by_model_set",
+                return_value=(
+                    {},
+                    pd.DataFrame(
+                        {
+                            "target_id": ["v25_p1"],
+                            "selected_model_id": ["ridge"],
+                            "selected_combo_id": ["combo_ridge"],
+                            "cv_r2": [0.4],
+                        }
+                    ),
+                ),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._evaluate_reasoning_transfer",
+                return_value=(
+                    pd.DataFrame(
+                        {
+                            "model_set_id": ["ridge"],
+                            "target_id": ["v25_p1"],
+                            "r2": [0.2],
+                            "rmse": [0.3],
+                            "mae": [0.1],
+                        }
+                    ),
+                    pd.DataFrame(
+                        {
+                            "model_set_id": ["ridge"],
+                            "r2_mean": [0.2],
+                            "r2_std": [0.0],
+                            "rmse_mean": [0.3],
+                            "mae_mean": [0.1],
+                        }
+                    ),
+                ),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._evaluate_success_transfer",
+                return_value=pd.DataFrame(
+                    {
+                        "model_set_id": ["ridge"],
+                        "branch_id": ["pred_reasoning_only"],
+                        "f0_5": [0.4],
+                        "roc_auc": [0.6],
+                        "pr_auc": [0.5],
+                        "precision": [0.4],
+                        "recall": [0.3],
+                        "threshold": [0.5],
+                    }
+                ),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._load_reproduction_consistency_reference",
+                return_value=(pd.DataFrame(), "repro_source"),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._build_reproduction_consistency_table",
+                return_value=pd.DataFrame(
+                    {
+                        "experiment_id": ["hq_only"],
+                        "headline_target_f0_5": [0.273],
+                        "reproduced_test_f0_5": [0.272],
+                        "delta_f0_5": [-0.001],
+                        "abs_delta_f0_5": [0.001],
+                        "within_tolerance": [True],
+                    }
+                ),
+            ):
+                run_dir = run_saved_config_evaluation_mode(
+                    config,
+                    RunOverrides(
+                        run_mode="saved_config_evaluation_mode",
+                        saved_eval_mode="full_transfer_report",
+                        saved_eval_combo_refs=[
+                            f"{bundle_dir}::combo_ridge",
+                            f"{bundle_dir}::combo_xgb",
+                            f"{bundle_dir}::combo_mlp",
+                        ],
+                    ),
+                )
+            self.assertTrue((run_dir / "reasoning_transfer_per_target.csv").exists())
+            self.assertTrue((run_dir / "reasoning_transfer_summary.csv").exists())
+            self.assertTrue((run_dir / "success_transfer_metrics.csv").exists())
+            self.assertTrue((run_dir / "reproduction_consistency_check.csv").exists())
+            self.assertTrue((run_dir / "full_transfer_report.md").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_load_latest_xgb_calibration_returns_none_when_missing(self) -> None:
         self.assertIsNone(load_latest_xgb_calibration("definitely_missing_experiment_for_test"))

@@ -1,9 +1,9 @@
 # Most Recent Model Testing Run
 
 - Mode: `model_testing_mode`
-- Source run dir: `C:\Users\joelb\OneDrive\Vela_partnerships_project\Teacher_student_project\Vela_teacher_student_llm_reasoning\tmp\runs\teacher_student_distillation_v1\2026-04-19_013502_764818_saved_config_evaluation`
+- Source run dir: `C:\Users\joelb\OneDrive\Vela_partnerships_project\Teacher_student_project\Vela_teacher_student_llm_reasoning\tmp\runs\teacher_student_distillation_v1\2026-04-20_024204_856747_saved_config_evaluation`
 - Docs artifacts dir: `C:\Users\joelb\OneDrive\Vela_partnerships_project\Teacher_student_project\Vela_teacher_student_llm_reasoning\docs\key-experiment-summaries\most-recent-model-testing-run`
-- Copied top-level artifacts: 4
+- Copied top-level artifacts: 9
 - Copied child-run artifact files: 0
 
 ## Artifact Snapshot
@@ -17,10 +17,15 @@
 
 ### Copied Top-Level Files
 
+- `combined_best_assignment.csv`
+- `full_transfer_report.md`
+- `reasoning_transfer_per_target.csv`
+- `reasoning_transfer_summary.csv`
+- `reproduction_consistency_check.csv`
 - `resolved_config.json`
 - `resolved_run_options.json`
 - `saved_config_eval_summary.md`
-- `success_with_pred_reasoning_metrics.csv`
+- `success_transfer_metrics.csv`
 
 ## Report Files
 

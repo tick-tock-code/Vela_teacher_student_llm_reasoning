@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Callable
 
 import numpy as np
@@ -253,6 +254,11 @@ def _safe_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
     return float(roc_auc_score(y_true, y_score))
 
 
+def _safe_filename_token(value: object) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
+    return token.strip("._") or "target"
+
+
 def _predict_binary_probabilities(model: object, X: np.ndarray) -> np.ndarray:
     if hasattr(model, "predict_proba"):
         proba = np.asarray(model.predict_proba(X), dtype=float)
@@ -266,7 +272,7 @@ def _predict_binary_probabilities(model: object, X: np.ndarray) -> np.ndarray:
     raise RuntimeError("Model does not expose predict_proba or decision_function for classification.")
 
 
-def _predict_multi_output_probabilities(model: MultiOutputClassifier, X: np.ndarray, n_targets: int) -> np.ndarray:
+def _predict_multi_output_probabilities(model: object, X: np.ndarray, n_targets: int) -> np.ndarray:
     probs_list = model.predict_proba(X)
     if not isinstance(probs_list, list):
         probs_arr = np.asarray(probs_list, dtype=float)
@@ -287,6 +293,10 @@ def _predict_multi_output_probabilities(model: MultiOutputClassifier, X: np.ndar
     if len(columns) != n_targets:
         raise RuntimeError("Multi-output probability matrix column count does not match target count.")
     return np.column_stack(columns)
+
+
+def _prefer_native_multi_output(model_kind: str) -> bool:
+    return str(model_kind) in {"mlp_regressor", "mlp_classifier"}
 
 
 def _select_best_params_multi_output_regression(
@@ -310,12 +320,19 @@ def _select_best_params_multi_output_regression(
     for candidate in candidates:
         fold_scores: list[float] = []
         for split in inner_splits:
-            base = build_reasoning_regressor(
-                model_kind,
-                random_state=random_state,
-                param_overrides=candidate,
-            )
-            model = MultiOutputRegressor(base)
+            if _prefer_native_multi_output(model_kind):
+                model = build_reasoning_regressor(
+                    model_kind,
+                    random_state=random_state,
+                    param_overrides=candidate,
+                )
+            else:
+                base = build_reasoning_regressor(
+                    model_kind,
+                    random_state=random_state,
+                    param_overrides=candidate,
+                )
+                model = MultiOutputRegressor(base)
             model.fit(X_train[split.train_idx], y_train[split.train_idx])
             preds = model.predict(X_train[split.test_idx])
             per_target_scores = [
@@ -351,12 +368,19 @@ def _select_best_params_multi_output_classification(
     for candidate in candidates:
         fold_scores: list[float] = []
         for split in inner_splits:
-            base = build_reasoning_classifier(
-                model_kind,
-                random_state=random_state,
-                param_overrides=candidate,
-            )
-            model = MultiOutputClassifier(base)
+            if _prefer_native_multi_output(model_kind):
+                model = build_reasoning_classifier(
+                    model_kind,
+                    random_state=random_state,
+                    param_overrides=candidate,
+                )
+            else:
+                base = build_reasoning_classifier(
+                    model_kind,
+                    random_state=random_state,
+                    param_overrides=candidate,
+                )
+                model = MultiOutputClassifier(base)
             model.fit(X_train[split.train_idx], y_train[split.train_idx])
             probs = _predict_multi_output_probabilities(model, X_train[split.test_idx], y_train.shape[1])
             per_target_scores = [
@@ -654,6 +678,75 @@ def _aggregate_model_results(
     ).drop(columns=["architecture_sort_idx"]).reset_index(drop=True)
 
 
+def _build_v25_per_target_screening(stage_a_repeat_metrics: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "target_family",
+        "output_mode",
+        "model_architecture",
+        "model_id",
+        "feature_set_id",
+        "target_id",
+        "r2",
+        "rmse",
+        "mae",
+    ]
+    if stage_a_repeat_metrics.empty:
+        return pd.DataFrame(columns=columns)
+
+    required_columns = {"target_family", "split_id", "feature_set_id", "model_id", "output_mode", "target_id"}
+    if not required_columns.issubset(set(stage_a_repeat_metrics.columns)):
+        return pd.DataFrame(columns=columns)
+
+    for metric_column in ("r2", "rmse", "mae"):
+        if metric_column not in stage_a_repeat_metrics.columns:
+            stage_a_repeat_metrics[metric_column] = float("nan")
+
+    filtered = stage_a_repeat_metrics[
+        (stage_a_repeat_metrics["target_family"] == "v25_policies")
+        & (stage_a_repeat_metrics["split_id"] == "oof_overall")
+    ].copy()
+    if filtered.empty:
+        return pd.DataFrame(columns=columns)
+
+    filtered["model_architecture"] = filtered["model_id"].astype(str).map(_model_architecture)
+    filtered["architecture_sort_idx"] = (
+        filtered["model_architecture"].astype(str).map(ARCHITECTURE_SORT_INDEX).fillna(999).astype(int)
+    )
+    return filtered[columns + ["architecture_sort_idx"]].sort_values(
+        ["architecture_sort_idx", "model_id", "feature_set_id", "output_mode", "target_id"],
+        ascending=[True, True, True, True, True],
+    ).drop(columns=["architecture_sort_idx"]).reset_index(drop=True)
+
+
+def _append_v25_per_target_screening_markdown(
+    lines: list[str],
+    per_target_details: pd.DataFrame | None,
+) -> None:
+    lines.extend(["## Per-Target Detailed Metrics (v25)", ""])
+    if per_target_details is None or per_target_details.empty:
+        lines.extend(["No v25 per-target rows are available.", ""])
+        return
+
+    group_columns = ["model_architecture", "model_id", "feature_set_id", "output_mode"]
+    for (model_architecture, model_id, feature_set_id, output_mode), combo_frame in per_target_details.groupby(
+        group_columns,
+        sort=False,
+    ):
+        lines.extend(
+            [
+                f"### {_architecture_label(str(model_architecture))} | {model_id} | {feature_set_id} | {output_mode}",
+                "",
+                "| target_id | r2 | rmse | mae |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+        for row in combo_frame.itertuples(index=False):
+            lines.append(
+                f"| {row.target_id} | {float(row.r2):.4f} | {float(row.rmse):.4f} | {float(row.mae):.4f} |"
+            )
+        lines.append("")
+
+
 def _render_screening_markdown(
     screening_overall: pd.DataFrame,
     screening_by_architecture: pd.DataFrame,
@@ -662,6 +755,7 @@ def _render_screening_markdown(
     stage_a_model_families: list[str],
     score_delta: float,
     max_recommended: int,
+    per_target_details: pd.DataFrame | None = None,
 ) -> str:
     lines = [
         "# Feature-Set Screening Report",
@@ -675,6 +769,7 @@ def _render_screening_markdown(
     ]
     if screening_overall.empty and screening_by_architecture.empty:
         lines.append("No screening results were produced.")
+        _append_v25_per_target_screening_markdown(lines, per_target_details)
         return "\n".join(lines)
 
     if not screening_by_architecture.empty:
@@ -724,6 +819,7 @@ def _render_screening_markdown(
 
     if screening_overall.empty:
         lines.append("Cross-architecture recommendation rows are not available.")
+        _append_v25_per_target_screening_markdown(lines, per_target_details)
         return "\n".join(lines)
 
     recommended_rows = screening_overall[screening_overall["recommended_take_forward"]].copy()
@@ -754,6 +850,7 @@ def _render_screening_markdown(
     lines.append(
         "Take-forward sets above are selected using blended screening scores across enabled Stage A models for each target/output combination."
     )
+    _append_v25_per_target_screening_markdown(lines, per_target_details)
     return "\n".join(lines)
 
 
@@ -902,12 +999,13 @@ def _run_stage(
     output_mode: str,
     model_param_overrides_by_model_id: dict[str, dict[str, object]] | None,
     logger: Logger | None,
-) -> tuple[pd.DataFrame, list[dict[str, object]]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, object]]]:
     if output_mode == "single_target":
         from src.pipeline.distillation import run_reasoning_distillation_mode
 
         seeds = _repeat_seeds(config, repeat_count)
         stage_rows: list[pd.DataFrame] = []
+        stage_detail_rows: list[pd.DataFrame] = []
         child_runs: list[dict[str, object]] = []
         for repeat_index, seed in enumerate(seeds):
             if repeat_index > 0:
@@ -956,6 +1054,13 @@ def _run_stage(
             )
             metrics = _load_reasoning_metrics(run_dir)
             metrics["output_mode"] = output_mode
+            detail_metrics = metrics.copy()
+            detail_metrics["repeat_index"] = repeat_index
+            detail_metrics["repeat_seed"] = seed
+            detail_metrics["target_family"] = family_id
+            detail_metrics["stage"] = "screening"
+            detail_metrics["output_mode"] = output_mode
+            stage_detail_rows.append(detail_metrics)
             stage_rows.append(
                 _group_repeat_metrics(
                     metrics,
@@ -966,7 +1071,11 @@ def _run_stage(
                     output_mode=output_mode,
                 )
             )
-        return pd.concat(stage_rows, ignore_index=True), child_runs
+        return (
+            pd.concat(stage_rows, ignore_index=True),
+            pd.concat(stage_detail_rows, ignore_index=True),
+            child_runs,
+        )
 
     if output_mode != "multi_output":
         raise RuntimeError(f"Unsupported output_mode '{output_mode}'.")
@@ -1049,6 +1158,7 @@ def _run_stage(
 
     seeds = _repeat_seeds(config, repeat_count)
     stage_rows = []
+    stage_detail_rows = []
     child_runs = []
     for repeat_index, seed in enumerate(seeds):
         if repeat_index > 0:
@@ -1141,12 +1251,19 @@ def _run_stage(
                     **dict((model_param_overrides_by_model_id or {}).get(model_spec.model_id, {})),
                     **best_params,
                 }
-                base = build_reasoning_regressor(
-                    model_spec.kind,
-                    random_state=seed + model_offset + fold_offset,
-                    param_overrides=best_params,
-                )
-                model = MultiOutputRegressor(base)
+                if _prefer_native_multi_output(model_spec.kind):
+                    model = build_reasoning_regressor(
+                        model_spec.kind,
+                        random_state=seed + model_offset + fold_offset,
+                        param_overrides=best_params,
+                    )
+                else:
+                    base = build_reasoning_regressor(
+                        model_spec.kind,
+                        random_state=seed + model_offset + fold_offset,
+                        param_overrides=best_params,
+                    )
+                    model = MultiOutputRegressor(base)
                 with _fit_heartbeat(logger, stage_label=stage_label):
                     model.fit(X_train, y_train)
                 preds = np.clip(
@@ -1175,12 +1292,19 @@ def _run_stage(
                     **dict((model_param_overrides_by_model_id or {}).get(model_spec.model_id, {})),
                     **best_params,
                 }
-                base = build_reasoning_classifier(
-                    model_spec.kind,
-                    random_state=seed + model_offset + fold_offset,
-                    param_overrides=best_params,
-                )
-                model = MultiOutputClassifier(base)
+                if _prefer_native_multi_output(model_spec.kind):
+                    model = build_reasoning_classifier(
+                        model_spec.kind,
+                        random_state=seed + model_offset + fold_offset,
+                        param_overrides=best_params,
+                    )
+                else:
+                    base = build_reasoning_classifier(
+                        model_spec.kind,
+                        random_state=seed + model_offset + fold_offset,
+                        param_overrides=best_params,
+                    )
+                    model = MultiOutputClassifier(base)
                 with _fit_heartbeat(logger, stage_label=stage_label):
                     model.fit(X_train, y_train)
                 preds = _predict_multi_output_probabilities(model, X_test, y_public.shape[1])
@@ -1283,6 +1407,13 @@ def _run_stage(
                         )
 
         repeat_metrics_frame = pd.DataFrame(repeat_metric_rows)
+        repeat_details = repeat_metrics_frame[repeat_metrics_frame["split_id"] == "oof_overall"].copy()
+        repeat_details["repeat_index"] = repeat_index
+        repeat_details["repeat_seed"] = seed
+        repeat_details["target_family"] = family_id
+        repeat_details["stage"] = "screening"
+        repeat_details["output_mode"] = output_mode
+        stage_detail_rows.append(repeat_details)
         stage_rows.append(
             _group_repeat_metrics(
                 repeat_metrics_frame,
@@ -1302,7 +1433,11 @@ def _run_stage(
                 "output_mode": output_mode,
             }
         )
-    return pd.concat(stage_rows, ignore_index=True), child_runs
+    return (
+        pd.concat(stage_rows, ignore_index=True),
+        pd.concat(stage_detail_rows, ignore_index=True),
+        child_runs,
+    )
 
 
 def _save_stage_a_model_bundle(
@@ -1416,20 +1551,34 @@ def _save_stage_a_model_bundle(
 
                 if output_mode == "multi_output":
                     if task_kind == "regression":
-                        base_model = build_reasoning_regressor(
-                            model_spec.kind,
-                            random_state=config.distillation_cv.random_state + model_offset,
-                            param_overrides=model_overrides.get(model_id, {}),
-                        )
-                        model = MultiOutputRegressor(base_model)
+                        if _prefer_native_multi_output(model_spec.kind):
+                            model = build_reasoning_regressor(
+                                model_spec.kind,
+                                random_state=config.distillation_cv.random_state + model_offset,
+                                param_overrides=model_overrides.get(model_id, {}),
+                            )
+                        else:
+                            base_model = build_reasoning_regressor(
+                                model_spec.kind,
+                                random_state=config.distillation_cv.random_state + model_offset,
+                                param_overrides=model_overrides.get(model_id, {}),
+                            )
+                            model = MultiOutputRegressor(base_model)
                         model.fit(X_public, y_public)
                     else:
-                        base_model = build_reasoning_classifier(
-                            model_spec.kind,
-                            random_state=config.distillation_cv.random_state + model_offset,
-                            param_overrides=model_overrides.get(model_id, {}),
-                        )
-                        model = MultiOutputClassifier(base_model)
+                        if _prefer_native_multi_output(model_spec.kind):
+                            model = build_reasoning_classifier(
+                                model_spec.kind,
+                                random_state=config.distillation_cv.random_state + model_offset,
+                                param_overrides=model_overrides.get(model_id, {}),
+                            )
+                        else:
+                            base_model = build_reasoning_classifier(
+                                model_spec.kind,
+                                random_state=config.distillation_cv.random_state + model_offset,
+                                param_overrides=model_overrides.get(model_id, {}),
+                            )
+                            model = MultiOutputClassifier(base_model)
                         model.fit(X_public, y_public)
                         train_probs = _predict_multi_output_probabilities(
                             model,
@@ -1440,7 +1589,7 @@ def _save_stage_a_model_bundle(
                             thresholds_by_target[target_name] = float(
                                 select_f05_threshold(y_public[:, target_idx], train_probs[:, target_idx])
                             )
-                    rel_path = Path("models") / f"{combo_id}.pkl"
+                    rel_path = Path("models") / f"combo_{combo_counter:04d}.pkl"
                     save_pickle(bundle_dir / rel_path, model)
                     entry = {
                         "combo_id": combo_id,
@@ -1479,7 +1628,8 @@ def _save_stage_a_model_bundle(
                         thresholds_by_target[target_name] = float(
                             select_f05_threshold(y_public[:, target_idx], train_probs)
                         )
-                    rel_path = Path("models") / f"{combo_id}__{target_name}.pkl"
+                    safe_target_name = _safe_filename_token(target_name)
+                    rel_path = Path("models") / f"combo_{combo_counter:04d}__t{target_idx:02d}__{safe_target_name}.pkl"
                     save_pickle(bundle_dir / rel_path, model)
                     target_model_artifacts[target_name] = str(rel_path.as_posix())
                 bundle_entries.append(
@@ -1615,6 +1765,7 @@ def run_model_testing_mode(
             )
 
     stage_a_rows: list[pd.DataFrame] = []
+    stage_a_detail_rows: list[pd.DataFrame] = []
     stage_a_child_runs: list[dict[str, object]] = []
     stage_a_nested_effective_map: dict[str, bool] = {}
     stage_a_combo_requests: list[dict[str, object]] = []
@@ -1686,7 +1837,7 @@ def run_model_testing_mode(
                 f"Stage A screening for '{family_id}' ({output_mode}) with feature sets: {feature_set_ids}. "
                 f"Nested requested={resolved.distillation_nested_sweep}, effective={stage_a_nested_effective}.",
             )
-            stage_metrics, child_runs = _run_stage(
+            stage_metrics, stage_metrics_detail, child_runs = _run_stage(
                 config,
                 stage_name="Stage A",
                 base_overrides=overrides_use,
@@ -1701,6 +1852,7 @@ def run_model_testing_mode(
                 logger=logger,
             )
             stage_a_rows.append(stage_metrics)
+            stage_a_detail_rows.append(stage_metrics_detail)
             stage_a_child_runs.extend(child_runs)
             stage_a_combo_requests.append(
                 {
@@ -1714,8 +1866,14 @@ def run_model_testing_mode(
             )
 
     stage_a_repeat_metrics = pd.concat(stage_a_rows, ignore_index=True) if stage_a_rows else pd.DataFrame()
-    write_csv(run_dir / "feature_set_screening_repeat_metrics.csv", stage_a_repeat_metrics)
+    stage_a_repeat_metrics_detailed = (
+        pd.concat(stage_a_detail_rows, ignore_index=True) if stage_a_detail_rows else pd.DataFrame()
+    )
+    write_csv(run_dir / "feature_set_screening_repeat_metrics.csv", stage_a_repeat_metrics_detailed)
+    write_csv(run_dir / "feature_set_screening_repeat_summary.csv", stage_a_repeat_metrics)
     write_json(run_dir / "feature_set_screening_child_runs.json", stage_a_child_runs)
+    v25_per_target_screening = _build_v25_per_target_screening(stage_a_repeat_metrics_detailed)
+    write_csv(run_dir / "feature_set_screening_per_target.csv", v25_per_target_screening)
 
     screening_rows: list[pd.DataFrame] = []
     screening_by_architecture_rows: list[pd.DataFrame] = []
@@ -1772,6 +1930,7 @@ def run_model_testing_mode(
             stage_a_model_families=stage_a_model_families,
             score_delta=config.model_testing.screening_score_delta,
             max_recommended=config.model_testing.max_recommended_feature_sets,
+            per_target_details=v25_per_target_screening,
         ),
     )
 

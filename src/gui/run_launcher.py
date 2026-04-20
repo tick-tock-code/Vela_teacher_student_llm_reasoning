@@ -14,7 +14,11 @@ from src.pipeline.config import ExperimentConfig, load_experiment_config
 from src.pipeline.distillation import run_pipeline
 from src.pipeline.mlp_calibration import load_latest_mlp_calibration
 from src.pipeline.rf_calibration import load_latest_rf_calibration
-from src.pipeline.saved_model_configs import list_saved_bundle_dirs, resolve_saved_bundle_path
+from src.pipeline.saved_model_configs import (
+    list_saved_bundle_dirs,
+    load_bundle_manifest,
+    resolve_saved_bundle_path,
+)
 from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides
 from src.utils.model_ids import (
@@ -54,6 +58,9 @@ class LauncherSelections:
     save_model_configs_after_training: bool | None = None
     saved_config_bundle_path: str | None = None
     saved_eval_mode: str | None = None
+    saved_eval_combo_ids: list[str] | None = None
+    saved_eval_combo_refs: list[str] | None = None
+    saved_eval_per_target_best_r2: bool | None = None
     hq_exit_override_mode: str | None = None
     xgb_calibration_estimators: list[int] | None = None
     use_latest_xgb_calibration: bool | None = None
@@ -91,6 +98,9 @@ def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
         save_model_configs_after_training=selections.save_model_configs_after_training,
         saved_config_bundle_path=selections.saved_config_bundle_path,
         saved_eval_mode=selections.saved_eval_mode,
+        saved_eval_combo_ids=selections.saved_eval_combo_ids,
+        saved_eval_combo_refs=selections.saved_eval_combo_refs,
+        saved_eval_per_target_best_r2=selections.saved_eval_per_target_best_r2,
         hq_exit_override_mode=selections.hq_exit_override_mode,
         xgb_calibration_estimators=selections.xgb_calibration_estimators,
         use_latest_xgb_calibration=selections.use_latest_xgb_calibration,
@@ -176,6 +186,24 @@ class RunLauncher(ttk.Frame):
         self.saved_bundle_selection_var = tk.StringVar(value="")
         self.saved_eval_mode_var = tk.StringVar(value="reasoning_test_metrics")
         self.saved_hq_override_mode_var = tk.StringVar(value="with_override")
+        self.saved_eval_best_r2_var = tk.BooleanVar(value=False)
+        self.saved_combo_count_var = tk.StringVar(value="No bundle selected")
+        self._saved_combo_ids_by_index: list[str] = []
+        self.saved_model_pick_bundle_vars: dict[str, tk.StringVar] = {
+            "linear_l2": tk.StringVar(value=""),
+            XGB_FAMILY_ID: tk.StringVar(value=""),
+            "mlp": tk.StringVar(value=""),
+        }
+        self.saved_model_pick_combo_vars: dict[str, tk.StringVar] = {
+            "linear_l2": tk.StringVar(value=""),
+            XGB_FAMILY_ID: tk.StringVar(value=""),
+            "mlp": tk.StringVar(value=""),
+        }
+        self._saved_model_pick_combo_choices: dict[str, list[tuple[str, str]]] = {
+            "linear_l2": [],
+            XGB_FAMILY_ID: [],
+            "mlp": [],
+        }
 
         self.feature_bank_vars: dict[str, tk.BooleanVar] = {}
         self.setup_sentence_bundle_var: tk.BooleanVar | None = None
@@ -529,12 +557,13 @@ class RunLauncher(ttk.Frame):
             width=80,
         )
         self.saved_bundle_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(8, 0))
+        self.saved_bundle_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_saved_eval_combo_choices())
 
         ttk.Label(self.saved_eval_tab, text="Evaluation mode").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.saved_eval_mode_combo = ttk.Combobox(
             self.saved_eval_tab,
             textvariable=self.saved_eval_mode_var,
-            values=("reasoning_test_metrics", "success_with_pred_reasoning"),
+            values=("reasoning_test_metrics", "success_with_pred_reasoning", "full_transfer_report"),
             state="readonly",
             width=40,
         )
@@ -550,19 +579,102 @@ class RunLauncher(ttk.Frame):
         )
         self.saved_hq_override_combo.grid(row=3, column=1, sticky="w", pady=(8, 0))
 
+        ttk.Checkbutton(
+            self.saved_eval_tab,
+            text="Build per-target composite (choose best CV R^2 combo per target)",
+            variable=self.saved_eval_best_r2_var,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+
+        picks_frame = ttk.LabelFrame(self.saved_eval_tab, text="Cross-Run Model Picks (Optional)")
+        picks_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        picks_frame.columnconfigure(1, weight=1)
+        picks_frame.columnconfigure(2, weight=1)
+        ttk.Label(picks_frame, text="Model family").grid(row=0, column=0, sticky="w")
+        ttk.Label(picks_frame, text="Bundle").grid(row=0, column=1, sticky="w")
+        ttk.Label(picks_frame, text="Combo").grid(row=0, column=2, sticky="w")
+        row_specs = [
+            ("linear_l2", "Linear L2"),
+            (XGB_FAMILY_ID, XGB_FAMILY_UI_LABEL),
+            ("mlp", "MLP"),
+        ]
+        self.saved_model_pick_bundle_combos: dict[str, ttk.Combobox] = {}
+        self.saved_model_pick_combo_combos: dict[str, ttk.Combobox] = {}
+        for row_index, (family_id, label) in enumerate(row_specs, start=1):
+            ttk.Label(picks_frame, text=label).grid(row=row_index, column=0, sticky="w", pady=(6, 0))
+            bundle_combo = ttk.Combobox(
+                picks_frame,
+                textvariable=self.saved_model_pick_bundle_vars[family_id],
+                state="readonly",
+                width=46,
+            )
+            bundle_combo.grid(row=row_index, column=1, sticky="ew", padx=(8, 8), pady=(6, 0))
+            bundle_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _event, model_family=family_id: self._refresh_saved_pick_combo_choices(model_family),
+            )
+            combo_combo = ttk.Combobox(
+                picks_frame,
+                textvariable=self.saved_model_pick_combo_vars[family_id],
+                state="readonly",
+                width=64,
+            )
+            combo_combo.grid(row=row_index, column=2, sticky="ew", pady=(6, 0))
+            self.saved_model_pick_bundle_combos[family_id] = bundle_combo
+            self.saved_model_pick_combo_combos[family_id] = combo_combo
+
+        ttk.Label(
+            picks_frame,
+            text=(
+                "Pick combos from different runs, then enable the composite toggle above. "
+                "Composite uses the best source CV R^2 per target."
+            ),
+            justify="left",
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        ttk.Button(
+            self.saved_eval_tab,
+            text="Lambda Bundle Transfer Report Preset",
+            command=self._apply_lambda_bundle_transfer_preset,
+        ).grid(row=6, column=0, sticky="w", pady=(10, 0))
+
+        combo_frame = ttk.LabelFrame(self.saved_eval_tab, text="Saved Combos To Evaluate")
+        combo_frame.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        combo_frame.columnconfigure(0, weight=1)
+        combo_frame.rowconfigure(1, weight=1)
+        ttk.Label(
+            combo_frame,
+            textvariable=self.saved_combo_count_var,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.saved_combo_listbox = tk.Listbox(
+            combo_frame,
+            selectmode="extended",
+            exportselection=False,
+            height=10,
+        )
+        self.saved_combo_listbox.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        combo_scroll = ttk.Scrollbar(combo_frame, orient="vertical", command=self.saved_combo_listbox.yview)
+        combo_scroll.grid(row=1, column=1, sticky="ns", pady=(6, 0))
+        self.saved_combo_listbox.configure(yscrollcommand=combo_scroll.set)
+        combo_actions = ttk.Frame(combo_frame)
+        combo_actions.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(combo_actions, text="Select All", command=self._select_all_saved_eval_combos).grid(row=0, column=0, sticky="w")
+        ttk.Button(combo_actions, text="Clear Selection", command=self._clear_saved_eval_combos).grid(row=0, column=1, sticky="w", padx=(8, 0))
+
         ttk.Button(
             self.saved_eval_tab,
             text="Run Saved Config Eval",
             command=self.start_saved_config_eval,
-        ).grid(row=4, column=0, sticky="w", pady=(12, 0))
+        ).grid(row=8, column=0, sticky="w", pady=(12, 0))
         ttk.Label(
             self.saved_eval_tab,
             text=(
                 "reasoning_test_metrics: evaluate saved reasoning models on held-out test targets.\n"
-                "success_with_pred_reasoning: evaluate HQ/LLM branches using predicted reasoning + fixed L2 C=5."
+                "success_with_pred_reasoning: evaluate HQ/LLM branches using predicted reasoning + fixed L2 C=5.\n"
+                "full_transfer_report: lambda-bundle transfer report (reasoning + success + reproduction consistency)."
             ),
             justify="left",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
     def _load_config_preview(self) -> None:
         config = load_experiment_config(self.config_path_var.get().strip())
@@ -586,6 +698,7 @@ class RunLauncher(ttk.Frame):
         self.mt_use_latest_xgb_calibration_var.set(bool(config.model_testing.use_latest_xgb_calibration_default))
         self.mt_use_latest_rf_calibration_var.set(bool(config.model_testing.use_latest_rf_calibration_default))
         self.mt_use_latest_mlp_calibration_var.set(bool(config.model_testing.use_latest_mlp_calibration_default))
+        self.saved_eval_best_r2_var.set(False)
         default_model_families = set(config.model_testing.default_model_families)
         for family_id, var in self.mt_model_family_vars.items():
             var.set(family_id in default_model_families)
@@ -669,10 +782,229 @@ class RunLauncher(ttk.Frame):
             bundles = []
         values = [str(path) for path in bundles]
         self.saved_bundle_combo.configure(values=values)
+        for model_family in ("linear_l2", XGB_FAMILY_ID, "mlp"):
+            bundle_combo = self.saved_model_pick_bundle_combos.get(model_family)
+            if bundle_combo is not None:
+                bundle_combo.configure(values=values)
+            current_pick = self.saved_model_pick_bundle_vars[model_family].get().strip()
+            if current_pick and current_pick in values:
+                pass
+            else:
+                self.saved_model_pick_bundle_vars[model_family].set(values[0] if values else "")
+            self._refresh_saved_pick_combo_choices(model_family)
         current = self.saved_bundle_selection_var.get().strip()
         if current and current in values:
+            self._refresh_saved_eval_combo_choices()
             return
         self.saved_bundle_selection_var.set(values[0] if values else "")
+        self._refresh_saved_eval_combo_choices()
+
+    @staticmethod
+    def _format_saved_combo_label(combo: dict[str, object]) -> str:
+        return (
+            f"{combo.get('combo_id', 'unknown')} | "
+            f"{combo.get('target_family', 'unknown')} | "
+            f"{combo.get('feature_set_id', 'unknown')} | "
+            f"{combo.get('model_id', 'unknown')} | "
+            f"{combo.get('output_mode', 'unknown')}"
+        )
+
+    @staticmethod
+    def _saved_pick_family_match(model_family: str, model_id: str) -> bool:
+        model_id_use = str(model_id).strip().lower()
+        if model_family == "linear_l2":
+            return model_id_use in {"ridge", "logreg_classifier"}
+        if model_family == XGB_FAMILY_ID:
+            return model_id_use.startswith("xgb")
+        if model_family == "mlp":
+            return model_id_use.startswith("mlp")
+        return False
+
+    @staticmethod
+    def _format_saved_pick_combo_label(combo: dict[str, object]) -> str:
+        return (
+            f"{combo.get('combo_id', 'unknown')} | "
+            f"{combo.get('target_family', 'unknown')} | "
+            f"{combo.get('feature_set_id', 'unknown')} | "
+            f"{combo.get('model_id', 'unknown')} | "
+            f"{combo.get('output_mode', 'unknown')}"
+        )
+
+    def _refresh_saved_pick_combo_choices(self, model_family: str) -> None:
+        if model_family not in self.saved_model_pick_bundle_vars:
+            return
+        bundle_value = self.saved_model_pick_bundle_vars[model_family].get().strip()
+        combo_widget = self.saved_model_pick_combo_combos.get(model_family)
+        if combo_widget is None:
+            return
+        self.saved_model_pick_combo_vars[model_family].set("")
+        self._saved_model_pick_combo_choices[model_family] = []
+        if not bundle_value:
+            combo_widget.configure(values=[])
+            return
+        try:
+            _, manifest = load_bundle_manifest(bundle_value)
+        except Exception:
+            combo_widget.configure(values=[])
+            return
+        matched: list[tuple[str, str]] = []
+        for item in list(manifest.get("combos", [])):
+            combo = dict(item)
+            combo_id = str(combo.get("combo_id", "")).strip()
+            model_id = str(combo.get("model_id", "")).strip()
+            if not combo_id or not self._saved_pick_family_match(model_family, model_id):
+                continue
+            label = self._format_saved_pick_combo_label(combo)
+            matched.append((combo_id, label))
+        self._saved_model_pick_combo_choices[model_family] = matched
+        values = [label for _, label in matched]
+        combo_widget.configure(values=values)
+        if values:
+            combo_widget.set(values[0])
+            self.saved_model_pick_combo_vars[model_family].set(values[0])
+
+    def _selected_saved_eval_combo_refs(self) -> list[str]:
+        refs: list[str] = []
+        for model_family in ("linear_l2", XGB_FAMILY_ID, "mlp"):
+            bundle_value = self.saved_model_pick_bundle_vars[model_family].get().strip()
+            label_value = self.saved_model_pick_combo_vars[model_family].get().strip()
+            if not bundle_value or not label_value:
+                continue
+            choice_map = {
+                label: combo_id
+                for combo_id, label in self._saved_model_pick_combo_choices.get(model_family, [])
+            }
+            combo_id = choice_map.get(label_value)
+            if combo_id is None:
+                continue
+            refs.append(f"{bundle_value}::{combo_id}")
+        return refs
+
+    def _apply_lambda_bundle_transfer_preset(self) -> None:
+        self._refresh_saved_bundle_choices()
+        bundle_values = list(self.saved_bundle_combo.cget("values"))
+        if not bundle_values:
+            self._append_log("ERROR: No saved model bundles are available for preset selection.")
+            self.status_var.set("Invalid input")
+            return
+
+        desired: list[tuple[str, str]] = [
+            ("linear_l2", "ridge"),
+            (XGB_FAMILY_ID, "xgb3_regressor"),
+            ("mlp", "mlp_regressor"),
+        ]
+        picks: dict[str, tuple[str, str]] = {}
+        for family_id, model_id in desired:
+            selected: tuple[str, str] | None = None
+            for bundle_value in bundle_values:
+                try:
+                    _, manifest = load_bundle_manifest(bundle_value)
+                except Exception:
+                    continue
+                for item in list(manifest.get("combos", [])):
+                    combo = dict(item)
+                    if str(combo.get("target_family", "")).strip() != "v25_policies":
+                        continue
+                    if str(combo.get("feature_set_id", "")).strip() != "lambda_policies_plus_sentence_bundle":
+                        continue
+                    if str(combo.get("model_id", "")).strip() != model_id:
+                        continue
+                    combo_id = str(combo.get("combo_id", "")).strip()
+                    if not combo_id:
+                        continue
+                    selected = (bundle_value, combo_id)
+                    break
+                if selected is not None:
+                    break
+            if selected is None:
+                self._append_log(
+                    "ERROR: Could not find required combo for preset: "
+                    f"model_id='{model_id}', target_family='v25_policies', "
+                    "feature_set='lambda_policies_plus_sentence_bundle'."
+                )
+                self.status_var.set("Invalid input")
+                return
+            picks[family_id] = selected
+
+        for family_id, (bundle_value, combo_id) in picks.items():
+            self.saved_model_pick_bundle_vars[family_id].set(bundle_value)
+            bundle_widget = self.saved_model_pick_bundle_combos.get(family_id)
+            if bundle_widget is not None:
+                bundle_widget.set(bundle_value)
+            self._refresh_saved_pick_combo_choices(family_id)
+            label_by_id = {
+                combo_id_value: label
+                for combo_id_value, label in self._saved_model_pick_combo_choices.get(family_id, [])
+            }
+            label = label_by_id.get(combo_id)
+            if label is None:
+                self._append_log(
+                    f"ERROR: Preset combo id '{combo_id}' could not be selected in UI for family '{family_id}'."
+                )
+                self.status_var.set("Invalid input")
+                return
+            self.saved_model_pick_combo_vars[family_id].set(label)
+            combo_widget = self.saved_model_pick_combo_combos.get(family_id)
+            if combo_widget is not None:
+                combo_widget.set(label)
+
+        first_bundle = next(iter(picks.values()))[0]
+        self.saved_bundle_selection_var.set(first_bundle)
+        self.saved_eval_mode_var.set("full_transfer_report")
+        self.saved_eval_best_r2_var.set(True)
+        self.saved_hq_override_mode_var.set("with_override")
+        self._refresh_saved_eval_combo_choices()
+        self.status_var.set("Preset loaded")
+        self._append_log(
+            "Applied Lambda Bundle Transfer Report preset with ridge/xgb3_regressor/mlp_regressor cross-run picks."
+        )
+
+    def _select_all_saved_eval_combos(self) -> None:
+        if not hasattr(self, "saved_combo_listbox"):
+            return
+        self.saved_combo_listbox.selection_set(0, "end")
+
+    def _clear_saved_eval_combos(self) -> None:
+        if not hasattr(self, "saved_combo_listbox"):
+            return
+        self.saved_combo_listbox.selection_clear(0, "end")
+
+    def _selected_saved_eval_combo_ids(self) -> list[str] | None:
+        if not hasattr(self, "saved_combo_listbox"):
+            return None
+        selected_indices = list(self.saved_combo_listbox.curselection())
+        if not selected_indices:
+            return []
+        return [self._saved_combo_ids_by_index[index] for index in selected_indices]
+
+    def _refresh_saved_eval_combo_choices(self) -> None:
+        if not hasattr(self, "saved_combo_listbox"):
+            return
+        self.saved_combo_listbox.delete(0, "end")
+        self._saved_combo_ids_by_index = []
+        bundle_value = self.saved_bundle_selection_var.get().strip()
+        if not bundle_value:
+            self.saved_combo_count_var.set("No bundle selected")
+            return
+        try:
+            bundle_dir, manifest = load_bundle_manifest(bundle_value)
+        except Exception as exc:
+            self.saved_combo_count_var.set(f"Failed to read bundle manifest: {exc}")
+            return
+        combos = [dict(item) for item in list(manifest.get("combos", []))]
+        if not combos:
+            self.saved_combo_count_var.set(f"No combos found in {bundle_dir}")
+            return
+        for combo in combos:
+            combo_id = str(combo.get("combo_id", "")).strip()
+            if not combo_id:
+                continue
+            self._saved_combo_ids_by_index.append(combo_id)
+            self.saved_combo_listbox.insert("end", self._format_saved_combo_label(combo))
+        self._select_all_saved_eval_combos()
+        self.saved_combo_count_var.set(
+            f"Loaded {len(self._saved_combo_ids_by_index)} combos from {bundle_dir}"
+        )
 
     def _rebuild_feature_bank_controls(self) -> None:
         for child in self.setup_features_frame.winfo_children():
@@ -922,6 +1254,11 @@ class RunLauncher(ttk.Frame):
     def _saved_eval_selections(self) -> LauncherSelections:
         common = self._build_common_kwargs()
         bundle_value = self.saved_bundle_selection_var.get().strip()
+        mode_value = self.saved_eval_mode_var.get().strip() or None
+        use_full_transfer_mode = mode_value == "full_transfer_report"
+        use_composite_best_r2 = use_full_transfer_mode or bool(self.saved_eval_best_r2_var.get())
+        selected_combo_ids = None if use_composite_best_r2 else self._selected_saved_eval_combo_ids()
+        selected_combo_refs = self._selected_saved_eval_combo_refs() if use_composite_best_r2 else None
         return LauncherSelections(
             run_mode="saved_config_evaluation_mode",
             target_family=self.mt_target_family_var.get().strip(),
@@ -940,7 +1277,10 @@ class RunLauncher(ttk.Frame):
             model_family_output_modes=None,
             save_model_configs_after_training=False,
             saved_config_bundle_path=bundle_value or None,
-            saved_eval_mode=self.saved_eval_mode_var.get().strip() or None,
+            saved_eval_mode=mode_value,
+            saved_eval_combo_ids=selected_combo_ids,
+            saved_eval_combo_refs=selected_combo_refs,
+            saved_eval_per_target_best_r2=use_composite_best_r2,
             hq_exit_override_mode=self.saved_hq_override_mode_var.get().strip() or None,
             use_latest_xgb_calibration=False,
             use_latest_rf_calibration=False,
@@ -1164,13 +1504,55 @@ class RunLauncher(ttk.Frame):
     def start_saved_config_eval(self) -> None:
         try:
             selections = self._saved_eval_selections()
-            bundle_raw = (selections.saved_config_bundle_path or "").strip()
-            if not bundle_raw:
-                raise ValueError("Select a saved model config bundle.")
-            resolved_bundle = resolve_saved_bundle_path(bundle_raw)
-            if not resolved_bundle.exists():
-                raise ValueError(f"Saved bundle path does not exist: {resolved_bundle}")
-            selections = replace(selections, saved_config_bundle_path=str(resolved_bundle))
+            is_full_transfer_mode = selections.saved_eval_mode == "full_transfer_report"
+            if selections.saved_eval_per_target_best_r2:
+                combo_refs = list(selections.saved_eval_combo_refs or [])
+                if not combo_refs:
+                    raise ValueError(
+                        "Select at least one model-specific combo (Linear L2, XGB, or MLP) "
+                        "when per-target composite is enabled."
+                    )
+                resolved_refs: list[str] = []
+                first_bundle: str | None = None
+                for combo_ref in combo_refs:
+                    raw = str(combo_ref).strip()
+                    if "::" not in raw:
+                        raise ValueError(
+                            f"Invalid combo ref '{raw}'. Expected format: <bundle_path_or_id>::<combo_id>"
+                        )
+                    bundle_part, combo_id = raw.split("::", 1)
+                    bundle_token = bundle_part.strip()
+                    combo_token = combo_id.strip()
+                    if not bundle_token or not combo_token:
+                        raise ValueError(
+                            f"Invalid combo ref '{raw}'. Expected format: <bundle_path_or_id>::<combo_id>"
+                        )
+                    resolved_bundle = resolve_saved_bundle_path(bundle_token)
+                    if not resolved_bundle.exists():
+                        raise ValueError(f"Saved bundle path does not exist: {resolved_bundle}")
+                    if first_bundle is None:
+                        first_bundle = str(resolved_bundle)
+                    resolved_refs.append(f"{resolved_bundle}::{combo_token}")
+                if is_full_transfer_mode and len(resolved_refs) < 3:
+                    raise ValueError(
+                        "full_transfer_report requires three combo refs "
+                        "(ridge, xgb3_regressor, mlp_regressor)."
+                    )
+                selections = replace(
+                    selections,
+                    saved_config_bundle_path=first_bundle,
+                    saved_eval_combo_refs=resolved_refs,
+                )
+            else:
+                bundle_raw = (selections.saved_config_bundle_path or "").strip()
+                if not bundle_raw:
+                    raise ValueError("Select a saved model config bundle.")
+                resolved_bundle = resolve_saved_bundle_path(bundle_raw)
+                if not resolved_bundle.exists():
+                    raise ValueError(f"Saved bundle path does not exist: {resolved_bundle}")
+                if selections.saved_eval_combo_ids is not None and len(selections.saved_eval_combo_ids) == 0:
+                    raise ValueError("Select at least one saved combo for evaluation.")
+                selections = replace(selections, saved_config_bundle_path=str(resolved_bundle))
         except ValueError as exc:
             self.status_var.set("Invalid input")
             self._append_log(f"ERROR: {exc}")

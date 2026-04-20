@@ -108,8 +108,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--saved-eval-mode",
-        choices=["reasoning_test_metrics", "success_with_pred_reasoning"],
+        choices=["reasoning_test_metrics", "success_with_pred_reasoning", "full_transfer_report"],
         help="Evaluation mode for saved_config_evaluation_mode.",
+    )
+    parser.add_argument(
+        "--saved-eval-combo-ids",
+        nargs="*",
+        help="Optional subset of saved bundle combo_id values to evaluate in saved_config_evaluation_mode.",
+    )
+    parser.add_argument(
+        "--saved-eval-combo-refs",
+        nargs="*",
+        help=(
+            "Optional cross-bundle combo refs for saved_config_evaluation_mode. "
+            "Format: <bundle_path_or_id>::<combo_id>"
+        ),
+    )
+    parser.add_argument(
+        "--saved-eval-per-target-best-r2",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "When enabled in saved_config_evaluation_mode, create a composite prediction set "
+            "that picks the highest-CV-R^2 combo per target."
+        ),
     )
     parser.add_argument(
         "--hq-exit-override-mode",
@@ -293,6 +315,17 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
             if args.saved_eval_mode
             else None
         ),
+        saved_eval_combo_ids=(
+            [str(item) for item in args.saved_eval_combo_ids]
+            if args.saved_eval_combo_ids is not None
+            else None
+        ),
+        saved_eval_combo_refs=(
+            [str(item) for item in args.saved_eval_combo_refs]
+            if args.saved_eval_combo_refs is not None
+            else None
+        ),
+        saved_eval_per_target_best_r2=args.saved_eval_per_target_best_r2,
         hq_exit_override_mode=(
             str(args.hq_exit_override_mode)
             if args.hq_exit_override_mode

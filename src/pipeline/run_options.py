@@ -23,7 +23,11 @@ from src.utils.parallel import resolve_max_parallel_workers
 
 DEFAULT_CONFIG_PATH = "experiments/teacher_student_distillation_v1.json"
 SUPPORTED_OUTPUT_MODES = {"single_target", "multi_output"}
-SUPPORTED_SAVED_EVAL_MODES = {"reasoning_test_metrics", "success_with_pred_reasoning"}
+SUPPORTED_SAVED_EVAL_MODES = {
+    "reasoning_test_metrics",
+    "success_with_pred_reasoning",
+    "full_transfer_report",
+}
 SUPPORTED_HQ_EXIT_OVERRIDE_MODES = {"with_override", "both_with_and_without"}
 
 
@@ -78,6 +82,9 @@ class RunOverrides:
     save_model_configs_after_training: bool | None = None
     saved_config_bundle_path: str | None = None
     saved_eval_mode: str | None = None
+    saved_eval_combo_ids: list[str] | None = None
+    saved_eval_combo_refs: list[str] | None = None
+    saved_eval_per_target_best_r2: bool | None = None
     hq_exit_override_mode: str | None = None
     xgb_calibration_estimators: list[int] | None = None
     use_latest_xgb_calibration: bool | None = None
@@ -120,6 +127,9 @@ class ResolvedRunOptions:
     save_model_configs_after_training: bool
     saved_config_bundle_path: str | None
     saved_eval_mode: str | None
+    saved_eval_combo_ids: list[str] | None
+    saved_eval_combo_refs: list[str] | None
+    saved_eval_per_target_best_r2: bool
     hq_exit_override_mode: str
     xgb_calibration_estimators: list[int]
     use_latest_xgb_calibration: bool
@@ -607,6 +617,9 @@ def resolve_run_options(
 
     saved_config_bundle_path = None
     saved_eval_mode = None
+    saved_eval_combo_ids: list[str] | None = None
+    saved_eval_combo_refs: list[str] | None = None
+    saved_eval_per_target_best_r2 = False
     hq_exit_override_mode = "with_override"
     if run_mode == "saved_config_evaluation_mode":
         saved_config_bundle_path = (
@@ -614,9 +627,20 @@ def resolve_run_options(
             if overrides_use.saved_config_bundle_path
             else None
         )
-        if not saved_config_bundle_path:
+        if overrides_use.saved_eval_combo_refs is not None:
+            saved_eval_combo_refs = [
+                str(value).strip()
+                for value in overrides_use.saved_eval_combo_refs
+                if str(value).strip()
+            ]
+            if not saved_eval_combo_refs:
+                raise RuntimeError(
+                    "saved_eval_combo_refs was provided but no non-empty combo refs were supplied."
+                )
+        if not saved_config_bundle_path and not saved_eval_combo_refs:
             raise RuntimeError(
-                "saved_config_evaluation_mode requires saved_config_bundle_path."
+                "saved_config_evaluation_mode requires saved_config_bundle_path "
+                "or saved_eval_combo_refs."
             )
         saved_eval_mode = (
             str(overrides_use.saved_eval_mode).strip()
@@ -628,6 +652,22 @@ def resolve_run_options(
                 f"Unsupported saved_eval_mode '{saved_eval_mode}'. "
                 f"Supported: {sorted(SUPPORTED_SAVED_EVAL_MODES)}"
             )
+        if saved_eval_mode == "full_transfer_report" and not saved_eval_combo_refs:
+            raise RuntimeError(
+                "saved_eval_mode=full_transfer_report requires saved_eval_combo_refs with "
+                "cross-run combo picks (<bundle>::<combo_id>) for ridge, xgb3_regressor, and mlp_regressor."
+            )
+        if overrides_use.saved_eval_combo_ids is not None:
+            saved_eval_combo_ids = [
+                str(value).strip()
+                for value in overrides_use.saved_eval_combo_ids
+                if str(value).strip()
+            ]
+            if not saved_eval_combo_ids:
+                raise RuntimeError(
+                    "saved_eval_combo_ids was provided but no non-empty combo ids were supplied."
+                )
+        saved_eval_per_target_best_r2 = bool(overrides_use.saved_eval_per_target_best_r2)
         hq_exit_override_mode = (
             str(overrides_use.hq_exit_override_mode).strip()
             if overrides_use.hq_exit_override_mode
@@ -756,6 +796,9 @@ def resolve_run_options(
         save_model_configs_after_training=save_model_configs_after_training,
         saved_config_bundle_path=saved_config_bundle_path,
         saved_eval_mode=saved_eval_mode,
+        saved_eval_combo_ids=saved_eval_combo_ids,
+        saved_eval_combo_refs=saved_eval_combo_refs,
+        saved_eval_per_target_best_r2=saved_eval_per_target_best_r2,
         hq_exit_override_mode=hq_exit_override_mode,
         xgb_calibration_estimators=xgb_calibration_estimators,
         use_latest_xgb_calibration=use_latest_xgb_calibration,

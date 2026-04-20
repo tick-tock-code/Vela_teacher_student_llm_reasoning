@@ -1,0 +1,203 @@
+{
+  "config_path": "experiments/teacher_student_distillation_v1.json",
+  "run_mode": "model_testing_mode",
+  "target_family": {
+    "family_id": "v25_policies",
+    "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_train.csv",
+    "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\policies\\predictions_test.csv",
+    "source_id_column": "founder_uuid",
+    "target_id_column": "founder_uuid",
+    "target_prefixes": [
+      "v25_"
+    ],
+    "task_kind": "regression",
+    "scale_min": 0.0,
+    "scale_max": 1.0,
+    "enabled_by_default": true
+  },
+  "heldout_evaluation": false,
+  "active_feature_banks": [
+    "hq_baseline",
+    "lambda_policies",
+    "sentence_prose",
+    "sentence_structured"
+  ],
+  "force_rebuild_intermediary_features": false,
+  "repository_feature_banks": [
+    {
+      "feature_bank_id": "hq_baseline",
+      "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\hq_baseline\\features_train.csv",
+      "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\hq_baseline\\features_test.csv",
+      "source_id_column": "founder_uuid",
+      "enabled": true,
+      "feature_prefixes": [],
+      "exclude_columns": [],
+      "label_column": "success",
+      "all_features_binary": false,
+      "binary_feature_columns": [
+        "has_prior_ipo",
+        "has_prior_acquisition",
+        "stem_flag",
+        "seniority_is_monotone",
+        "company_size_is_growing",
+        "industry_alignment",
+        "is_serial_founder"
+      ]
+    },
+    {
+      "feature_bank_id": "lambda_policies",
+      "train_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\lambda_policies\\predictions_train.csv",
+      "test_path": "C:\\Users\\joelb\\OneDrive\\Vela_partnerships_project\\Teacher_student_project\\Vela_teacher_student_llm_reasoning\\Feature Repository\\lambda_policies\\predictions_test.csv",
+      "source_id_column": "founder_uuid",
+      "enabled": true,
+      "feature_prefixes": [
+        "lam_"
+      ],
+      "exclude_columns": [],
+      "label_column": null,
+      "all_features_binary": true,
+      "binary_feature_columns": []
+    }
+  ],
+  "intermediary_features": [
+    {
+      "feature_bank_id": "sentence_prose",
+      "kind": "sentence_transformer_prose_v1",
+      "enabled": true,
+      "embedding_model_name": "sentence-transformers/all-MiniLM-L6-v2"
+    },
+    {
+      "feature_bank_id": "sentence_structured",
+      "kind": "sentence_transformer_structured_v1",
+      "enabled": true,
+      "embedding_model_name": "sentence-transformers/all-MiniLM-L6-v2"
+    }
+  ],
+  "distillation_feature_sets": [
+    {
+      "feature_set_id": "hq_plus_sentence_bundle",
+      "feature_bank_ids": [
+        "hq_baseline",
+        "sentence_prose",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "lambda_policies_plus_sentence_bundle",
+      "feature_bank_ids": [
+        "lambda_policies",
+        "sentence_prose",
+        "sentence_structured"
+      ]
+    }
+  ],
+  "distillation_models": [
+    {
+      "model_id": "ridge",
+      "kind": "ridge",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    },
+    {
+      "model_id": "xgb3_regressor",
+      "kind": "xgb3_regressor",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    },
+    {
+      "model_id": "mlp_regressor",
+      "kind": "mlp_regressor",
+      "supported_task_kinds": [
+        "regression"
+      ]
+    }
+  ],
+  "repeat_cv_with_new_seeds": false,
+  "cv_seed_repeat_count": 1,
+  "distillation_nested_sweep": false,
+  "save_reasoning_predictions": true,
+  "candidate_feature_sets": [
+    "hq_plus_sentence_bundle",
+    "lambda_policies_plus_sentence_bundle"
+  ],
+  "model_families": [
+    "linear_l2",
+    "xgb3",
+    "mlp"
+  ],
+  "output_modes": [
+    "single_target",
+    "multi_output"
+  ],
+  "model_family_output_modes": {
+    "linear_l2": [
+      "single_target"
+    ],
+    "xgb3": [
+      "single_target"
+    ],
+    "mlp": [
+      "multi_output"
+    ]
+  },
+  "run_advanced_models": false,
+  "save_model_configs_after_training": true,
+  "saved_config_bundle_path": null,
+  "saved_eval_mode": null,
+  "saved_eval_combo_ids": null,
+  "hq_exit_override_mode": "with_override",
+  "xgb_calibration_estimators": [
+    40,
+    80,
+    120,
+    180,
+    240,
+    320
+  ],
+  "use_latest_xgb_calibration": false,
+  "rf_calibration_min_samples_leaf": [
+    2,
+    3,
+    4,
+    5
+  ],
+  "rf_calibration_max_depth": [
+    null,
+    10,
+    20,
+    30
+  ],
+  "rf_calibration_max_features": [
+    "sqrt",
+    0.5
+  ],
+  "use_latest_rf_calibration": false,
+  "mlp_calibration_hidden_layer_sizes": [
+    [
+      8
+    ],
+    [
+      16
+    ],
+    [
+      32
+    ],
+    [
+      16,
+      8
+    ]
+  ],
+  "mlp_calibration_alpha": [
+    0.001,
+    0.01,
+    0.1
+  ],
+  "use_latest_mlp_calibration": false,
+  "mlp_hidden_layer_sizes": null,
+  "mlp_alpha": null,
+  "xgb_model_param_overrides_by_model_id": {},
+  "rf_model_param_overrides_by_model_id": {},
+  "max_parallel_workers": 2
+}
