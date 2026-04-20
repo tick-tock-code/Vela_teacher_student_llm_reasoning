@@ -9,6 +9,16 @@ venv/
 tmp/**
 !tmp/.gitkeep
 
+# Generated model bundles (rebuildable)
+data/saved_model_configs/**
+!data/saved_model_configs/
+!data/saved_model_configs/.gitkeep
+
+# Generated intermediary matrices (rebuildable)
+data/intermediary_features/**/*.parquet
+data/intermediary_features/**/*.npy
+data/intermediary_features/**/*.npz
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
