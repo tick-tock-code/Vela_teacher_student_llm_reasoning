@@ -27,8 +27,43 @@ SUPPORTED_SAVED_EVAL_MODES = {
     "reasoning_test_metrics",
     "success_with_pred_reasoning",
     "full_transfer_report",
+    "combination_transfer_report",
 }
-SUPPORTED_HQ_EXIT_OVERRIDE_MODES = {"with_override", "both_with_and_without"}
+SUPPORTED_HQ_EXIT_OVERRIDE_MODES = {
+    "with_override",
+    "both_with_and_without",
+    "force_off_all_branches",
+    "force_on_all_branches",
+    "both_force_off_and_on_all_branches",
+}
+DEFAULT_SUCCESS_MODEL_VARIANTS: tuple[str, ...] = (
+    "single_model",
+    "soft_avg_model",
+    "soft_avg_weighted_model",
+)
+SUPPORTED_SUCCESS_MODEL_VARIANTS = set(DEFAULT_SUCCESS_MODEL_VARIANTS)
+
+ABLATION_V25_19SET_LINEAR_FEATURE_SET_IDS: tuple[str, ...] = (
+    "hq_baseline",
+    "llm_engineering",
+    "lambda_policies",
+    "sentence_prose",
+    "sentence_structured",
+    "sentence_bundle",
+    "hq_plus_sentence_prose",
+    "hq_plus_sentence_structured",
+    "hq_plus_sentence_bundle",
+    "llm_engineering_plus_sentence_prose",
+    "llm_engineering_plus_sentence_structured",
+    "llm_engineering_plus_sentence_bundle",
+    "lambda_policies_plus_sentence_prose",
+    "lambda_policies_plus_sentence_structured",
+    "lambda_policies_plus_sentence_bundle",
+    "hq_plus_llm_engineering_plus_sentence_bundle",
+    "hq_plus_lambda_policies_plus_sentence_bundle",
+    "llm_engineering_plus_lambda_policies_plus_sentence_bundle",
+    "hq_plus_llm_engineering_plus_lambda_policies_plus_sentence_bundle",
+)
 
 
 MODEL_FAMILY_TO_MODEL_ID: dict[str, dict[str, str]] = {
@@ -60,6 +95,14 @@ DEFAULT_MODEL_FAMILY_OUTPUT_MODES: dict[str, list[str]] = {
 }
 
 
+def _default_linear_distillation_model_id(task_kind: str) -> str:
+    if task_kind == "regression":
+        return "ridge"
+    if task_kind == "classification":
+        return "logreg_classifier"
+    raise RuntimeError(f"Unsupported task_kind for linear default model selection: {task_kind}")
+
+
 @dataclass(frozen=True)
 class RunOverrides:
     config_path: str = DEFAULT_CONFIG_PATH
@@ -70,7 +113,7 @@ class RunOverrides:
     force_rebuild_intermediary_features: bool = False
     reasoning_models: list[str] | None = None
     embedding_model_name: str | None = None
-    repeat_cv_with_new_seeds: bool = False
+    repeat_cv_with_new_seeds: bool | None = None
     cv_seed_repeat_count: int | None = None
     distillation_nested_sweep: bool | None = None
     save_reasoning_predictions: bool | None = None
@@ -84,6 +127,8 @@ class RunOverrides:
     saved_eval_mode: str | None = None
     saved_eval_combo_ids: list[str] | None = None
     saved_eval_combo_refs: list[str] | None = None
+    saved_eval_success_branch_ids: list[str] | None = None
+    success_model_variants: list[str] | None = None
     saved_eval_per_target_best_r2: bool | None = None
     hq_exit_override_mode: str | None = None
     xgb_calibration_estimators: list[int] | None = None
@@ -101,6 +146,7 @@ class RunOverrides:
     rf_model_param_overrides_by_model_id: dict[str, dict[str, object]] | None = None
     model_testing_per_fit_threads: int | None = None
     max_parallel_workers: int | None = None
+    ablation_v25_19set_linear_profile: bool = False
 
 
 @dataclass(frozen=True)
@@ -129,6 +175,8 @@ class ResolvedRunOptions:
     saved_eval_mode: str | None
     saved_eval_combo_ids: list[str] | None
     saved_eval_combo_refs: list[str] | None
+    saved_eval_success_branch_ids: list[str] | None
+    success_model_variants: list[str]
     saved_eval_per_target_best_r2: bool
     hq_exit_override_mode: str
     xgb_calibration_estimators: list[int]
@@ -145,6 +193,7 @@ class ResolvedRunOptions:
     xgb_model_param_overrides_by_model_id: dict[str, dict[str, object]]
     rf_model_param_overrides_by_model_id: dict[str, dict[str, object]]
     max_parallel_workers: int
+    ablation_v25_19set_linear_profile: bool
 
 
 def _require_known_subset(
@@ -361,7 +410,12 @@ def _resolve_distillation_models(
 
     if run_mode == "reasoning_distillation_mode":
         if overrides.reasoning_models is None:
-            requested_ids = [spec.model_id for spec in available_model_specs]
+            requested_ids = [_default_linear_distillation_model_id(target_family.task_kind)]
+            _require_known_subset(
+                requested_ids,
+                available=available_ids,
+                label="distillation models",
+            )
         else:
             requested_ids = [normalize_xgb_model_kind(value) for value in overrides.reasoning_models]
             _require_known_subset(
@@ -400,7 +454,20 @@ def _resolve_distillation_models(
                 f"{missing}"
             )
     elif run_mode == "saved_config_evaluation_mode":
-        requested_ids = [spec.model_id for spec in available_model_specs]
+        if overrides.reasoning_models is None:
+            requested_ids = [_default_linear_distillation_model_id(target_family.task_kind)]
+            _require_known_subset(
+                requested_ids,
+                available=available_ids,
+                label="distillation models",
+            )
+        else:
+            requested_ids = [normalize_xgb_model_kind(value) for value in overrides.reasoning_models]
+            _require_known_subset(
+                requested_ids,
+                available=available_ids,
+                label="distillation models",
+            )
     else:
         model_map = MODEL_FAMILY_TO_MODEL_ID[target_family.task_kind]
         requested_ids = [model_map[family] for family in model_families]
@@ -424,6 +491,30 @@ def resolve_run_options(
     overrides: RunOverrides | None = None,
 ) -> ResolvedRunOptions:
     overrides_use = overrides or RunOverrides()
+    if overrides_use.ablation_v25_19set_linear_profile:
+        # Locked profile for train-only reasoning ablation recalculation.
+        overrides_use = replace(
+            overrides_use,
+            run_mode="model_testing_mode",
+            target_family="v25_policies",
+            heldout_evaluation=False,
+            active_feature_banks=None,
+            reasoning_models=None,
+            candidate_feature_sets=list(ABLATION_V25_19SET_LINEAR_FEATURE_SET_IDS),
+            model_families=["linear_l2"],
+            output_modes=["single_target"],
+            model_family_output_modes={"linear_l2": ["single_target"]},
+            repeat_cv_with_new_seeds=False,
+            cv_seed_repeat_count=1,
+            distillation_nested_sweep=False,
+            save_reasoning_predictions=False,
+            save_model_configs_after_training=False,
+            use_latest_xgb_calibration=False,
+            use_latest_rf_calibration=False,
+            use_latest_mlp_calibration=False,
+            xgb_model_param_overrides_by_model_id={},
+            rf_model_param_overrides_by_model_id={},
+        )
 
     run_mode = overrides_use.run_mode or config.defaults.run_mode
     if run_mode not in {
@@ -462,7 +553,11 @@ def resolve_run_options(
     if run_mode == "mlp_calibration_mode":
         heldout_evaluation = False
     if run_mode == "saved_config_evaluation_mode":
-        heldout_evaluation = True
+        heldout_evaluation = (
+            True
+            if overrides_use.heldout_evaluation is None
+            else bool(overrides_use.heldout_evaluation)
+        )
 
     available_repository_banks = [spec for spec in config.repository_feature_banks if spec.enabled]
     available_intermediary_banks = [spec for spec in config.intermediary_features if spec.enabled]
@@ -589,20 +684,9 @@ def resolve_run_options(
                 "policy_v25 is reserved for the success-reproduction track and is not a distillation input bank."
             )
 
-    cv_seed_repeat_count = (
-        int(overrides_use.cv_seed_repeat_count)
-        if overrides_use.cv_seed_repeat_count is not None
-        else (
-            config.model_testing.screening_repeat_cv_count
-            if (run_mode == "model_testing_mode" and overrides_use.repeat_cv_with_new_seeds)
-            else 1
-        )
-    )
-    repeat_cv_with_new_seeds = bool(overrides_use.repeat_cv_with_new_seeds)
-    if repeat_cv_with_new_seeds and cv_seed_repeat_count < 2:
-        raise RuntimeError("cv_seed_repeat_count must be >= 2 when repeat CV is enabled.")
-    if not repeat_cv_with_new_seeds:
-        cv_seed_repeat_count = 1
+    repeat_cv_override = overrides_use.repeat_cv_with_new_seeds
+    repeat_cv_with_new_seeds = False
+    cv_seed_repeat_count = 1
 
     # Deprecated: Stage-B advanced model-testing is inactive.
     run_advanced_models = False
@@ -619,6 +703,8 @@ def resolve_run_options(
     saved_eval_mode = None
     saved_eval_combo_ids: list[str] | None = None
     saved_eval_combo_refs: list[str] | None = None
+    saved_eval_success_branch_ids: list[str] | None = None
+    success_model_variants = list(DEFAULT_SUCCESS_MODEL_VARIANTS)
     saved_eval_per_target_best_r2 = False
     hq_exit_override_mode = "with_override"
     if run_mode == "saved_config_evaluation_mode":
@@ -652,11 +738,20 @@ def resolve_run_options(
                 f"Unsupported saved_eval_mode '{saved_eval_mode}'. "
                 f"Supported: {sorted(SUPPORTED_SAVED_EVAL_MODES)}"
             )
-        if saved_eval_mode == "full_transfer_report" and not saved_eval_combo_refs:
+        if (
+            saved_eval_mode == "combination_transfer_report"
+            and saved_eval_combo_refs is not None
+            and len(saved_eval_combo_refs) != 1
+        ):
             raise RuntimeError(
-                "saved_eval_mode=full_transfer_report requires saved_eval_combo_refs with "
-                "cross-run combo picks (<bundle>::<combo_id>) for ridge, xgb3_regressor, and mlp_regressor."
+                "saved_eval_mode=combination_transfer_report requires exactly one combo ref "
+                "(<bundle>::<combo_id>)."
             )
+        if saved_eval_mode in {"full_transfer_report", "combination_transfer_report"}:
+            if not saved_eval_combo_refs:
+                raise RuntimeError(
+                    "saved_eval_mode requires saved_eval_combo_refs for transfer evaluation."
+                )
         if overrides_use.saved_eval_combo_ids is not None:
             saved_eval_combo_ids = [
                 str(value).strip()
@@ -667,6 +762,38 @@ def resolve_run_options(
                 raise RuntimeError(
                     "saved_eval_combo_ids was provided but no non-empty combo ids were supplied."
                 )
+        if overrides_use.saved_eval_success_branch_ids is not None:
+            saved_eval_success_branch_ids = [
+                str(value).strip()
+                for value in overrides_use.saved_eval_success_branch_ids
+                if str(value).strip()
+            ]
+            if not saved_eval_success_branch_ids:
+                raise RuntimeError(
+                    "saved_eval_success_branch_ids was provided but no non-empty branch ids were supplied."
+                )
+            if saved_eval_mode != "combination_transfer_report":
+                raise RuntimeError(
+                    "saved_eval_success_branch_ids is only supported for "
+                    "saved_eval_mode=combination_transfer_report."
+                )
+        if overrides_use.success_model_variants is not None:
+            success_model_variants = _dedupe_preserve_order(
+                [
+                    str(value).strip()
+                    for value in overrides_use.success_model_variants
+                    if str(value).strip()
+                ]
+            )
+            if not success_model_variants:
+                raise RuntimeError(
+                    "success_model_variants was provided but no non-empty variants were supplied."
+                )
+            _require_known_subset(
+                success_model_variants,
+                available=SUPPORTED_SUCCESS_MODEL_VARIANTS,
+                label="success model variants",
+            )
         saved_eval_per_target_best_r2 = bool(overrides_use.saved_eval_per_target_best_r2)
         hq_exit_override_mode = (
             str(overrides_use.hq_exit_override_mode).strip()
@@ -678,6 +805,28 @@ def resolve_run_options(
                 f"Unsupported hq_exit_override_mode '{hq_exit_override_mode}'. "
                 f"Supported: {sorted(SUPPORTED_HQ_EXIT_OVERRIDE_MODES)}"
             )
+
+    default_repeat_enabled = False
+    default_repeat_count = 1
+    if run_mode == "model_testing_mode":
+        default_repeat_enabled = True
+        default_repeat_count = int(config.model_testing.screening_repeat_cv_count)
+    elif run_mode == "saved_config_evaluation_mode" and saved_eval_mode == "full_transfer_report":
+        default_repeat_enabled = True
+        default_repeat_count = int(config.model_testing.screening_repeat_cv_count)
+
+    repeat_cv_with_new_seeds = (
+        default_repeat_enabled if repeat_cv_override is None else bool(repeat_cv_override)
+    )
+    cv_seed_repeat_count = (
+        int(overrides_use.cv_seed_repeat_count)
+        if overrides_use.cv_seed_repeat_count is not None
+        else (default_repeat_count if repeat_cv_with_new_seeds else 1)
+    )
+    if repeat_cv_with_new_seeds and cv_seed_repeat_count < 2:
+        raise RuntimeError("cv_seed_repeat_count must be >= 2 when repeat CV is enabled.")
+    if not repeat_cv_with_new_seeds:
+        cv_seed_repeat_count = 1
 
     xgb_calibration_estimators = (
         [int(value) for value in overrides_use.xgb_calibration_estimators]
@@ -769,6 +918,20 @@ def resolve_run_options(
     if mlp_alpha is not None and mlp_alpha <= 0:
         raise RuntimeError("mlp_alpha must be > 0 when provided.")
 
+    nested_sweep_enabled = (
+        True
+        if (
+            run_mode == "saved_config_evaluation_mode"
+            and saved_eval_mode in {"full_transfer_report", "combination_transfer_report"}
+            and overrides_use.distillation_nested_sweep is None
+        )
+        else (
+            False
+            if overrides_use.distillation_nested_sweep is None
+            else bool(overrides_use.distillation_nested_sweep)
+        )
+    )
+
     return ResolvedRunOptions(
         config_path=overrides_use.config_path,
         run_mode=run_mode,
@@ -782,9 +945,7 @@ def resolve_run_options(
         distillation_models=selected_models,
         repeat_cv_with_new_seeds=repeat_cv_with_new_seeds,
         cv_seed_repeat_count=cv_seed_repeat_count,
-        distillation_nested_sweep=(
-            False if overrides_use.distillation_nested_sweep is None else bool(overrides_use.distillation_nested_sweep)
-        ),
+        distillation_nested_sweep=nested_sweep_enabled,
         save_reasoning_predictions=(
             True if overrides_use.save_reasoning_predictions is None else bool(overrides_use.save_reasoning_predictions)
         ),
@@ -798,6 +959,8 @@ def resolve_run_options(
         saved_eval_mode=saved_eval_mode,
         saved_eval_combo_ids=saved_eval_combo_ids,
         saved_eval_combo_refs=saved_eval_combo_refs,
+        saved_eval_success_branch_ids=saved_eval_success_branch_ids,
+        success_model_variants=success_model_variants,
         saved_eval_per_target_best_r2=saved_eval_per_target_best_r2,
         hq_exit_override_mode=hq_exit_override_mode,
         xgb_calibration_estimators=xgb_calibration_estimators,
@@ -816,4 +979,5 @@ def resolve_run_options(
         ),
         rf_model_param_overrides_by_model_id=dict(overrides_use.rf_model_param_overrides_by_model_id or {}),
         max_parallel_workers=resolve_max_parallel_workers(overrides_use.max_parallel_workers),
+        ablation_v25_19set_linear_profile=bool(overrides_use.ablation_v25_19set_linear_profile),
     )

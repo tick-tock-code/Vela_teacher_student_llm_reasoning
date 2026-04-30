@@ -250,7 +250,7 @@ def _join_unique_series(values: pd.Series) -> str:
 
 
 def publish_model_testing_run_summary(run_dir: Path) -> Path:
-    docs_root = DOCS_DIR / "key-experiment-summaries"
+    docs_root = DOCS_DIR / "experiment-archive" / "generated-reports"
     docs_root.mkdir(parents=True, exist_ok=True)
 
     latest_doc_path = docs_root / "most-recent-model-testing-run.md"
@@ -1584,7 +1584,7 @@ def run_pipeline(
         summary_title: str = "Run Setup Summary",
         summary_basename: str = "run_setup_summary",
     ) -> None:
-        docs_root = DOCS_DIR / "key-experiment-summaries"
+        docs_root = DOCS_DIR / "experiment-archive" / "generated-reports"
         docs_root.mkdir(parents=True, exist_ok=True)
 
         lines: list[str] = [
@@ -1641,41 +1641,43 @@ def run_pipeline(
 
         summary_text = "\n".join(lines).strip() + "\n"
         write_markdown(docs_root / f"{summary_basename}_latest.md", summary_text)
-        write_markdown(docs_root / f"{summary_basename}_{run_dir.name}.md", summary_text)
 
     overrides_use = overrides or RunOverrides()
+    dispatch_run_mode = overrides_use.run_mode
+    if dispatch_run_mode is None and overrides_use.ablation_v25_19set_linear_profile:
+        dispatch_run_mode = "model_testing_mode"
     thread_count = apply_global_thread_env()
     _log(
         logger,
         f"Global compute settings: BLAS/OpenMP thread env vars set to {thread_count}.",
     )
-    if overrides_use.run_mode == "model_testing_mode":
+    if dispatch_run_mode == "model_testing_mode":
         from src.pipeline.model_testing import run_model_testing_mode
 
         run_dir = run_model_testing_mode(config, overrides_use, logger=logger)
         publish_model_testing_run_summary(run_dir)
         return run_dir
-    if overrides_use.run_mode == "saved_config_evaluation_mode":
+    if dispatch_run_mode == "saved_config_evaluation_mode":
         from src.pipeline.saved_config_evaluation import run_saved_config_evaluation_mode
 
         run_dir = run_saved_config_evaluation_mode(config, overrides_use, logger=logger)
         publish_model_testing_run_summary(run_dir)
         return run_dir
-    if overrides_use.run_mode == "xgb_calibration_mode":
+    if dispatch_run_mode == "xgb_calibration_mode":
         from src.pipeline.xgb_calibration import run_xgb_calibration_mode
 
         return run_xgb_calibration_mode(config, overrides_use, logger=logger)
-    if overrides_use.run_mode == "rf_calibration_mode":
+    if dispatch_run_mode == "rf_calibration_mode":
         from src.pipeline.rf_calibration import run_rf_calibration_mode
 
         return run_rf_calibration_mode(config, overrides_use, logger=logger)
-    if overrides_use.run_mode == "mlp_calibration_mode":
+    if dispatch_run_mode == "mlp_calibration_mode":
         from src.pipeline.mlp_calibration import run_mlp_calibration_mode
 
         return run_mlp_calibration_mode(config, overrides_use, logger=logger)
 
     if (
-        (overrides_use.run_mode == "reasoning_distillation_mode")
+        (dispatch_run_mode == "reasoning_distillation_mode")
         and (overrides_use.target_family == "v25_and_taste")
     ):
         run_dir = timestamped_run_dir(RUNS_DIR / config.experiment_id, "reasoning_distillation_multi")

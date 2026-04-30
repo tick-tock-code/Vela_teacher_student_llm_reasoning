@@ -20,7 +20,11 @@ from src.pipeline.saved_model_configs import (
     resolve_saved_bundle_path,
 )
 from src.pipeline.xgb_calibration import load_latest_xgb_calibration
-from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides
+from src.pipeline.run_options import (
+    ABLATION_V25_19SET_LINEAR_FEATURE_SET_IDS,
+    DEFAULT_CONFIG_PATH,
+    RunOverrides,
+)
 from src.utils.model_ids import (
     XGB_CLASSIFIER_MODEL_KIND,
     XGB_FAMILY_ID,
@@ -60,6 +64,7 @@ class LauncherSelections:
     saved_eval_mode: str | None = None
     saved_eval_combo_ids: list[str] | None = None
     saved_eval_combo_refs: list[str] | None = None
+    saved_eval_success_branch_ids: list[str] | None = None
     saved_eval_per_target_best_r2: bool | None = None
     hq_exit_override_mode: str | None = None
     xgb_calibration_estimators: list[int] | None = None
@@ -100,6 +105,7 @@ def selections_to_overrides(selections: LauncherSelections) -> RunOverrides:
         saved_eval_mode=selections.saved_eval_mode,
         saved_eval_combo_ids=selections.saved_eval_combo_ids,
         saved_eval_combo_refs=selections.saved_eval_combo_refs,
+        saved_eval_success_branch_ids=selections.saved_eval_success_branch_ids,
         saved_eval_per_target_best_r2=selections.saved_eval_per_target_best_r2,
         hq_exit_override_mode=selections.hq_exit_override_mode,
         xgb_calibration_estimators=selections.xgb_calibration_estimators,
@@ -136,6 +142,27 @@ class RunLauncher(ttk.Frame):
         "lambda_policies_plus_sentence_prose",
         "lambda_policies_plus_sentence_bundle",
     )
+    ABLATION_V25_19SET_LINEAR_FEATURE_SET_IDS: tuple[str, ...] = ABLATION_V25_19SET_LINEAR_FEATURE_SET_IDS
+    COMBINATION_FEATURE_SET_IDS: tuple[str, ...] = (
+        "hq_plus_sentence_bundle",
+        "llm_engineering_plus_sentence_bundle",
+        "lambda_policies_plus_sentence_bundle",
+        "hq_plus_llm_engineering_plus_sentence_bundle",
+        "hq_plus_lambda_policies_plus_sentence_bundle",
+        "llm_engineering_plus_lambda_policies_plus_sentence_bundle",
+        "hq_plus_llm_engineering_plus_lambda_policies_plus_sentence_bundle",
+    )
+    COMBINATION_SUCCESS_BASE_COMBO_IDS: tuple[str, ...] = (
+        "hq_baseline",
+        "llm_engineering",
+        "lambda_policies",
+        "hq_plus_llm_engineering",
+        "hq_plus_lambda_policies",
+        "llm_engineering_plus_lambda_policies",
+        "hq_plus_llm_engineering_plus_lambda_policies",
+    )
+    COMBINATION_SUCCESS_OVERRIDE_BRANCHES: tuple[str, ...] = ("with_override", "without_override")
+    COMBINATION_SCREENING_DEFAULT_REPEAT_COUNT: int = 4
 
     def __init__(self, master: tk.Misc | None = None, *, initial_config_path: str = DEFAULT_CONFIG_PATH):
         super().__init__(master, padding=10)
@@ -182,6 +209,18 @@ class RunLauncher(ttk.Frame):
         self.mt_latest_calibration_var = tk.StringVar(value="No calibration loaded")
         self.mt_latest_rf_calibration_var = tk.StringVar(value="No RF calibration loaded")
         self.mt_latest_mlp_calibration_var = tk.StringVar(value="No MLP calibration loaded")
+        self.combo_target_family_var = tk.StringVar(value="v25_policies")
+        self.combo_repeat_cv_var = tk.BooleanVar(value=True)
+        self.combo_repeat_count_var = tk.StringVar(value=str(self.COMBINATION_SCREENING_DEFAULT_REPEAT_COUNT))
+        self.combo_save_model_configs_var = tk.BooleanVar(value=True)
+        self.combo_force_rebuild_var = tk.BooleanVar(value=False)
+        self.combo_bundle_root_var = tk.StringVar(value="data/saved_model_configs")
+        self.combo_bundle_selection_var = tk.StringVar(value="")
+        self.combo_selected_combo_var = tk.StringVar(value="")
+        self.combo_bundle_status_var = tk.StringVar(value="No bundle selected")
+        self._combo_combo_choices: list[tuple[str, str]] = []
+        self.combo_success_branch_count_var = tk.StringVar(value="No success branches selected")
+        self._combo_success_branch_ids_by_index: list[str] = []
         self.saved_bundle_root_var = tk.StringVar(value="data/saved_model_configs")
         self.saved_bundle_selection_var = tk.StringVar(value="")
         self.saved_eval_mode_var = tk.StringVar(value="reasoning_test_metrics")
@@ -210,16 +249,16 @@ class RunLauncher(ttk.Frame):
         self.setup_model_vars: dict[str, tk.BooleanVar] = {
             "linear_l2": tk.BooleanVar(value=True),
             "linear_svm": tk.BooleanVar(value=False),
-            XGB_FAMILY_ID: tk.BooleanVar(value=True),
+            XGB_FAMILY_ID: tk.BooleanVar(value=False),
         }
         self.mt_feature_set_vars: dict[str, tk.BooleanVar] = {}
         self.mt_model_family_vars: dict[str, tk.BooleanVar] = {
             "linear_l2": tk.BooleanVar(value=True),
             "linear_svm": tk.BooleanVar(value=False),
-            XGB_FAMILY_ID: tk.BooleanVar(value=True),
-            "mlp": tk.BooleanVar(value=True),
+            XGB_FAMILY_ID: tk.BooleanVar(value=False),
+            "mlp": tk.BooleanVar(value=False),
             "elasticnet": tk.BooleanVar(value=False),
-            "randomforest": tk.BooleanVar(value=True),
+            "randomforest": tk.BooleanVar(value=False),
         }
         self.mt_model_family_output_vars: dict[str, dict[str, tk.BooleanVar]] = {
             "linear_l2": {
@@ -309,30 +348,37 @@ class RunLauncher(ttk.Frame):
 
         setup_tab_container = ttk.Frame(notebook)
         testing_tab_container = ttk.Frame(notebook)
+        combination_tab_container = ttk.Frame(notebook)
         saved_eval_tab_container = ttk.Frame(notebook)
         notebook.add(setup_tab_container, text="Run Setup")
         notebook.add(testing_tab_container, text="Model Testing")
+        notebook.add(combination_tab_container, text="Combination Testing")
         notebook.add(saved_eval_tab_container, text="Saved Config Eval")
         self.setup_tab = self._make_scrollable_tab(setup_tab_container)
         self.testing_tab = self._make_scrollable_tab(testing_tab_container)
+        self.combination_tab = self._make_scrollable_tab(combination_tab_container)
         self.saved_eval_tab = self._make_scrollable_tab(saved_eval_tab_container)
 
         self._build_setup_tab()
         self._build_testing_tab()
+        self._build_combination_tab()
         self._build_saved_eval_tab()
 
         actions = ttk.Frame(self)
         actions.grid(row=2, column=0, sticky="ew", pady=(8, 8))
-        actions.columnconfigure(8, weight=1)
+        actions.columnconfigure(11, weight=1)
         ttk.Button(actions, text="Reset Defaults", command=self._reset_defaults).grid(row=0, column=0, sticky="w")
         ttk.Button(actions, text="Run Setup Pipeline", command=self.start_run_setup).grid(row=0, column=1, padx=(8, 0), sticky="w")
         ttk.Button(actions, text="Run Model Testing", command=self.start_model_testing).grid(row=0, column=2, padx=(8, 0), sticky="w")
-        ttk.Button(actions, text="Run Saved Config Eval", command=self.start_saved_config_eval).grid(row=0, column=3, padx=(8, 0), sticky="w")
-        ttk.Button(actions, text="Run XGB Calibration", command=self.start_xgb_calibration).grid(row=0, column=4, padx=(8, 0), sticky="w")
-        ttk.Button(actions, text="Run RF Calibration", command=self.start_rf_calibration).grid(row=0, column=5, padx=(8, 0), sticky="w")
-        ttk.Button(actions, text="Run MLP Calibration", command=self.start_mlp_calibration).grid(row=0, column=6, padx=(8, 0), sticky="w")
-        ttk.Button(actions, text="Run XGB Depth Test", command=self.start_xgb_depth_test).grid(row=0, column=7, padx=(8, 0), sticky="w")
-        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=8, sticky="w")
+        ttk.Button(actions, text="Run Combination Screening", command=self.start_combination_screening).grid(row=0, column=3, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run Combination Success CV", command=self.start_combination_success_screening).grid(row=0, column=4, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run Combination Success Test", command=self.start_combination_success_test_eval).grid(row=0, column=5, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run Saved Config Eval", command=self.start_saved_config_eval).grid(row=0, column=6, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run XGB Calibration", command=self.start_xgb_calibration).grid(row=0, column=7, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run RF Calibration", command=self.start_rf_calibration).grid(row=0, column=8, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run MLP Calibration", command=self.start_mlp_calibration).grid(row=0, column=9, padx=(8, 0), sticky="w")
+        ttk.Button(actions, text="Run XGB Depth Test", command=self.start_xgb_depth_test).grid(row=0, column=10, padx=(8, 0), sticky="w")
+        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=11, sticky="w")
 
         out = ttk.LabelFrame(self, text="Output")
         out.grid(row=3, column=0, sticky="ew", pady=(0, 8))
@@ -536,6 +582,182 @@ class RunLauncher(ttk.Frame):
             text="Screening is training-only: held-out/test features and labels are not used.",
             justify="left",
         ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Button(
+            settings,
+            text="Apply Ablation Preset (v25, 19-set, Linear L2)",
+            command=self._apply_ablation_v25_19set_linear_preset,
+        ).grid(row=12, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+    def _build_combination_tab(self) -> None:
+        self.combination_tab.columnconfigure(0, weight=1)
+        self.combination_tab.columnconfigure(1, weight=1)
+
+        step1 = ttk.LabelFrame(self.combination_tab, text="Step 1: Combination Screening (Train Only)")
+        step1.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        step1.columnconfigure(1, weight=1)
+
+        ttk.Label(step1, text="Target family").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(
+            step1,
+            textvariable=self.combo_target_family_var,
+            values=("v25_policies", "taste_policies", "v25_and_taste"),
+            state="readonly",
+            width=28,
+        ).grid(row=0, column=1, sticky="w")
+
+        ttk.Label(step1, text="Locked candidate feature sets").grid(row=1, column=0, sticky="nw", pady=(8, 0))
+        ttk.Label(
+            step1,
+            text="\n".join(self.COMBINATION_FEATURE_SET_IDS),
+            justify="left",
+        ).grid(row=1, column=1, sticky="w", pady=(8, 0))
+
+        families = ttk.Frame(step1)
+        families.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(families, text="Model family (locked)").grid(row=0, column=0, sticky="w")
+        ttk.Label(families, text="Linear L2 (single_target)").grid(row=1, column=0, sticky="w")
+
+        ttk.Checkbutton(
+            step1,
+            text="Repeat stratified CV with new random seeds",
+            variable=self.combo_repeat_cv_var,
+            command=self._on_combination_repeat_toggle,
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(step1, text="Repeat count").grid(row=3, column=1, sticky="w", padx=(180, 0), pady=(8, 0))
+        self.combo_repeat_entry = ttk.Entry(step1, textvariable=self.combo_repeat_count_var, width=8)
+        self.combo_repeat_entry.grid(row=3, column=1, sticky="w", padx=(260, 0), pady=(8, 0))
+
+        ttk.Checkbutton(
+            step1,
+            text="Save model configs after training",
+            variable=self.combo_save_model_configs_var,
+        ).grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            step1,
+            text="Force rebuild intermediary feature banks",
+            variable=self.combo_force_rebuild_var,
+        ).grid(row=4, column=1, sticky="w", pady=(8, 0))
+
+        ttk.Button(
+            step1,
+            text="Run Combination Screening (Train Only)",
+            command=self.start_combination_screening,
+        ).grid(row=5, column=0, sticky="w", pady=(10, 0))
+
+        ttk.Label(
+            step1,
+            text=(
+                "Step 1 always runs model_testing_mode with held-out disabled and ridge-only "
+                "(Linear L2, single_target)."
+            ),
+            justify="left",
+            wraplength=980,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        step2 = ttk.LabelFrame(self.combination_tab, text="Step 2: Success Screening (Train CV Only)")
+        step2.grid(row=1, column=0, columnspan=2, sticky="ew")
+        step2.columnconfigure(1, weight=1)
+
+        ttk.Label(step2, text="Saved bundle root").grid(row=0, column=0, sticky="w")
+        ttk.Entry(step2, textvariable=self.combo_bundle_root_var).grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        ttk.Button(step2, text="Refresh Bundles", command=self._refresh_combination_bundle_choices).grid(row=0, column=2, sticky="w")
+
+        ttk.Label(step2, text="Bundle").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.combo_bundle_combo = ttk.Combobox(
+            step2,
+            textvariable=self.combo_bundle_selection_var,
+            state="readonly",
+            width=82,
+        )
+        self.combo_bundle_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(8, 0))
+        self.combo_bundle_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_combination_combo_choices())
+
+        ttk.Label(step2, text="Selected combo").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.combo_selected_combo_combo = ttk.Combobox(
+            step2,
+            textvariable=self.combo_selected_combo_var,
+            state="readonly",
+            width=82,
+        )
+        self.combo_selected_combo_combo.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(8, 0))
+
+        ttk.Label(step2, textvariable=self.combo_bundle_status_var, justify="left").grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(8, 0)
+        )
+
+        ttk.Button(
+            step2,
+            text="Run Success Screening (Train CV Only)",
+            command=self.start_combination_success_screening,
+        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(
+            step2,
+            text=(
+                "Step 2 uses the selected reasoning-prediction combo and runs success CV across all 7 base "
+                "feature combinations with HQ override both ON and OFF."
+            ),
+            justify="left",
+            wraplength=980,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        step3 = ttk.LabelFrame(self.combination_tab, text="Step 3: Held-Out Test Evaluation (Selected Success Models)")
+        step3.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        step3.columnconfigure(0, weight=1)
+        step3.rowconfigure(1, weight=1)
+        ttk.Label(
+            step3,
+            text="Select one or multiple success models (branch + HQ override variant) for held-out testing.",
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+        self.combo_success_branch_listbox = tk.Listbox(
+            step3,
+            selectmode="extended",
+            exportselection=False,
+            height=10,
+        )
+        self.combo_success_branch_listbox.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        self.combo_success_branch_listbox.bind(
+            "<<ListboxSelect>>",
+            lambda _event: self._refresh_combination_success_branch_count(),
+        )
+        combo_branch_scroll = ttk.Scrollbar(
+            step3,
+            orient="vertical",
+            command=self.combo_success_branch_listbox.yview,
+        )
+        combo_branch_scroll.grid(row=1, column=1, sticky="ns", pady=(6, 0))
+        self.combo_success_branch_listbox.configure(yscrollcommand=combo_branch_scroll.set)
+        combo_branch_actions = ttk.Frame(step3)
+        combo_branch_actions.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(
+            combo_branch_actions,
+            text="Select All",
+            command=self._select_all_combination_success_branches,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            combo_branch_actions,
+            text="Clear Selection",
+            command=self._clear_combination_success_branches,
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(
+            step3,
+            textvariable=self.combo_success_branch_count_var,
+            justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(
+            step3,
+            text="Run Held-Out Test Evaluation (Selected Success Models)",
+            command=self.start_combination_success_test_eval,
+        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(
+            step3,
+            text=(
+                "Step 3 reuses the selected reasoning-prediction combo and evaluates only selected success "
+                "model branches on held-out test."
+            ),
+            justify="left",
+            wraplength=980,
+        ).grid(row=5, column=0, sticky="w", pady=(8, 0))
 
     def _build_saved_eval_tab(self) -> None:
         self.saved_eval_tab.columnconfigure(1, weight=1)
@@ -563,7 +785,12 @@ class RunLauncher(ttk.Frame):
         self.saved_eval_mode_combo = ttk.Combobox(
             self.saved_eval_tab,
             textvariable=self.saved_eval_mode_var,
-            values=("reasoning_test_metrics", "success_with_pred_reasoning", "full_transfer_report"),
+            values=(
+                "reasoning_test_metrics",
+                "success_with_pred_reasoning",
+                "full_transfer_report",
+                "combination_transfer_report",
+            ),
             state="readonly",
             width=40,
         )
@@ -573,7 +800,13 @@ class RunLauncher(ttk.Frame):
         self.saved_hq_override_combo = ttk.Combobox(
             self.saved_eval_tab,
             textvariable=self.saved_hq_override_mode_var,
-            values=("with_override", "both_with_and_without"),
+            values=(
+                "with_override",
+                "both_with_and_without",
+                "force_off_all_branches",
+                "force_on_all_branches",
+                "both_force_off_and_on_all_branches",
+            ),
             state="readonly",
             width=40,
         )
@@ -671,7 +904,8 @@ class RunLauncher(ttk.Frame):
             text=(
                 "reasoning_test_metrics: evaluate saved reasoning models on held-out test targets.\n"
                 "success_with_pred_reasoning: evaluate HQ/LLM branches using predicted reasoning + fixed L2 C=5.\n"
-                "full_transfer_report: lambda-bundle transfer report (reasoning + success + reproduction consistency)."
+                "full_transfer_report: lambda-bundle transfer report (reasoning + success + reproduction consistency).\n"
+                "combination_transfer_report: single selected combo -> held-out reasoning + 7-way success transfer."
             ),
             justify="left",
         ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(8, 0))
@@ -692,8 +926,13 @@ class RunLauncher(ttk.Frame):
         self.repeat_cv_var.set(False)
         self.repeat_count_var.set("1")
         self.setup_nested_cv_var.set(False)
-        self.mt_repeat_cv_var.set(False)
-        self.mt_repeat_count_var.set("1")
+        self.mt_repeat_cv_var.set(True)
+        self.mt_repeat_count_var.set(str(config.model_testing.screening_repeat_cv_count))
+        self.combo_target_family_var.set("v25_policies")
+        self.combo_repeat_cv_var.set(True)
+        self.combo_repeat_count_var.set(str(self.COMBINATION_SCREENING_DEFAULT_REPEAT_COUNT))
+        self.combo_save_model_configs_var.set(bool(config.model_testing.save_model_configs_after_training_default))
+        self.combo_force_rebuild_var.set(False)
         self.mt_save_model_configs_var.set(bool(config.model_testing.save_model_configs_after_training_default))
         self.mt_use_latest_xgb_calibration_var.set(bool(config.model_testing.use_latest_xgb_calibration_default))
         self.mt_use_latest_rf_calibration_var.set(bool(config.model_testing.use_latest_rf_calibration_default))
@@ -763,13 +1002,149 @@ class RunLauncher(ttk.Frame):
         self._sync_setup_mode()
         self._on_setup_repeat_toggle()
         self._on_testing_repeat_toggle()
+        self._on_combination_repeat_toggle()
         self._refresh_saved_bundle_choices()
+        self._refresh_combination_bundle_choices()
+        self._refresh_combination_success_branch_choices()
 
     def _reset_defaults(self) -> None:
         if self._loaded_config is None:
             return
         self._load_config_preview()
         self.status_var.set("Reset to defaults")
+
+    def _on_combination_repeat_toggle(self) -> None:
+        if not self.combo_repeat_cv_var.get():
+            self.combo_repeat_count_var.set("1")
+            self.combo_repeat_entry.state(["disabled"])
+            return
+        try:
+            value = int(self.combo_repeat_count_var.get().strip() or "0")
+        except ValueError:
+            value = 0
+        if value < 2:
+            default_repeat = self.COMBINATION_SCREENING_DEFAULT_REPEAT_COUNT
+            self.combo_repeat_count_var.set(str(default_repeat))
+        self.combo_repeat_entry.state(["!disabled"])
+
+    @staticmethod
+    def _format_combination_combo_label(combo: dict[str, object]) -> str:
+        return (
+            f"{combo.get('combo_id', 'unknown')} | "
+            f"{combo.get('target_family', 'unknown')} | "
+            f"{combo.get('feature_set_id', 'unknown')} | "
+            f"{combo.get('model_id', 'unknown')} | "
+            f"{combo.get('output_mode', 'unknown')}"
+        )
+
+    def _refresh_combination_bundle_choices(self) -> None:
+        root_text = self.combo_bundle_root_var.get().strip() or "data/saved_model_configs"
+        root_path = resolve_repo_path(root_text)
+        if root_text == "data/saved_model_configs":
+            bundles = list_saved_bundle_dirs()
+        elif root_path.exists():
+            bundles = sorted([path for path in root_path.iterdir() if path.is_dir()], key=lambda item: item.name, reverse=True)
+        else:
+            bundles = []
+        values = [str(path) for path in bundles]
+        self.combo_bundle_combo.configure(values=values)
+        current = self.combo_bundle_selection_var.get().strip()
+        if current and current in values:
+            self._refresh_combination_combo_choices()
+            return
+        self.combo_bundle_selection_var.set(values[0] if values else "")
+        self._refresh_combination_combo_choices()
+
+    def _refresh_combination_combo_choices(self) -> None:
+        bundle_value = self.combo_bundle_selection_var.get().strip()
+        self._combo_combo_choices = []
+        self.combo_selected_combo_var.set("")
+        if not bundle_value:
+            self.combo_selected_combo_combo.configure(values=[])
+            self.combo_bundle_status_var.set("No bundle selected")
+            return
+        try:
+            bundle_dir, manifest = load_bundle_manifest(bundle_value)
+        except Exception as exc:
+            self.combo_selected_combo_combo.configure(values=[])
+            self.combo_bundle_status_var.set(f"Failed to read bundle manifest: {exc}")
+            return
+        allowed_sets = set(self.COMBINATION_FEATURE_SET_IDS)
+        choices: list[tuple[str, str]] = []
+        for item in list(manifest.get("combos", [])):
+            combo = dict(item)
+            combo_id = str(combo.get("combo_id", "")).strip()
+            if not combo_id:
+                continue
+            if str(combo.get("target_family", "")).strip() != "v25_policies":
+                continue
+            if str(combo.get("task_kind", "")).strip() != "regression":
+                continue
+            if str(combo.get("feature_set_id", "")).strip() not in allowed_sets:
+                continue
+            label = self._format_combination_combo_label(combo)
+            choices.append((combo_id, label))
+        self._combo_combo_choices = choices
+        labels = [label for _, label in choices]
+        self.combo_selected_combo_combo.configure(values=labels)
+        if labels:
+            self.combo_selected_combo_var.set(labels[0])
+            self.combo_bundle_status_var.set(f"Loaded {len(labels)} valid v25 combination combos from {bundle_dir}")
+        else:
+            self.combo_bundle_status_var.set(f"No valid v25 combination combos found in {bundle_dir}")
+
+    def _selected_combination_combo_ref(self) -> str | None:
+        bundle_value = self.combo_bundle_selection_var.get().strip()
+        label_value = self.combo_selected_combo_var.get().strip()
+        if not bundle_value or not label_value:
+            return None
+        choice_map = {label: combo_id for combo_id, label in self._combo_combo_choices}
+        combo_id = choice_map.get(label_value)
+        if combo_id is None:
+            return None
+        return f"{bundle_value}::{combo_id}"
+
+    def _refresh_combination_success_branch_choices(self) -> None:
+        if not hasattr(self, "combo_success_branch_listbox"):
+            return
+        self.combo_success_branch_listbox.delete(0, "end")
+        self._combo_success_branch_ids_by_index = []
+        for base_combo_id in self.COMBINATION_SUCCESS_BASE_COMBO_IDS:
+            for override_branch in self.COMBINATION_SUCCESS_OVERRIDE_BRANCHES:
+                branch_id = f"{base_combo_id}__{override_branch}"
+                self._combo_success_branch_ids_by_index.append(branch_id)
+                self.combo_success_branch_listbox.insert("end", branch_id)
+        self._select_all_combination_success_branches()
+        self._refresh_combination_success_branch_count()
+
+    def _refresh_combination_success_branch_count(self) -> None:
+        if not hasattr(self, "combo_success_branch_listbox"):
+            return
+        selected_count = len(self.combo_success_branch_listbox.curselection())
+        total_count = len(self._combo_success_branch_ids_by_index)
+        self.combo_success_branch_count_var.set(
+            f"Selected {selected_count}/{total_count} success branches."
+        )
+
+    def _select_all_combination_success_branches(self) -> None:
+        if not hasattr(self, "combo_success_branch_listbox"):
+            return
+        self.combo_success_branch_listbox.selection_set(0, "end")
+        self._refresh_combination_success_branch_count()
+
+    def _clear_combination_success_branches(self) -> None:
+        if not hasattr(self, "combo_success_branch_listbox"):
+            return
+        self.combo_success_branch_listbox.selection_clear(0, "end")
+        self._refresh_combination_success_branch_count()
+
+    def _selected_combination_success_branch_ids(self) -> list[str]:
+        if not hasattr(self, "combo_success_branch_listbox"):
+            return []
+        selected_indices = list(self.combo_success_branch_listbox.curselection())
+        if not selected_indices:
+            return []
+        return [self._combo_success_branch_ids_by_index[index] for index in selected_indices]
 
     def _refresh_saved_bundle_choices(self) -> None:
         root_text = self.saved_bundle_root_var.get().strip() or "data/saved_model_configs"
@@ -1053,16 +1428,7 @@ class RunLauncher(ttk.Frame):
         if self._loaded_config is None:
             return
         defaults = set(self._loaded_config.model_testing.candidate_feature_sets)
-        allowed = {
-            "hq_plus_sentence_prose",
-            "llm_engineering_plus_sentence_prose",
-            "lambda_policies_plus_sentence_prose",
-            "sentence_prose",
-            "hq_plus_sentence_bundle",
-            "llm_engineering_plus_sentence_bundle",
-            "lambda_policies_plus_sentence_bundle",
-            "sentence_bundle",
-        }
+        allowed = set(self.ABLATION_V25_19SET_LINEAR_FEATURE_SET_IDS)
         row = 0
         for spec in self._loaded_config.distillation_feature_sets:
             feature_set_id = spec.feature_set_id
@@ -1075,6 +1441,30 @@ class RunLauncher(ttk.Frame):
                 row=row, column=0, sticky="w"
             )
             row += 1
+
+    def _apply_ablation_v25_19set_linear_preset(self) -> None:
+        self.mt_target_family_var.set("v25_policies")
+        self.mt_repeat_cv_var.set(False)
+        self.mt_repeat_count_var.set("1")
+        self.mt_force_rebuild_var.set(False)
+        self.mt_save_model_configs_var.set(False)
+        self.mt_use_latest_xgb_calibration_var.set(False)
+        self.mt_use_latest_rf_calibration_var.set(False)
+        self.mt_use_latest_mlp_calibration_var.set(False)
+
+        for family_id, var in self.mt_model_family_vars.items():
+            var.set(family_id == "linear_l2")
+        for family_id, mode_map in self.mt_model_family_output_vars.items():
+            mode_map["single_target"].set(family_id == "linear_l2")
+            mode_map["multi_output"].set(False)
+
+        allowed = set(self.ABLATION_V25_19SET_LINEAR_FEATURE_SET_IDS)
+        for feature_set_id, var in self.mt_feature_set_vars.items():
+            var.set(feature_set_id in allowed)
+
+        self._on_testing_repeat_toggle()
+        self._refresh_mt_target_preview()
+        self.status_var.set("Applied ablation preset (v25 19-set Linear L2)")
 
     def _sync_setup_mode(self) -> None:
         is_distillation = self.run_mode_var.get() == "reasoning_distillation_mode"
@@ -1251,17 +1641,78 @@ class RunLauncher(ttk.Frame):
             **common,
         )
 
-    def _saved_eval_selections(self) -> LauncherSelections:
+    def _combination_screening_selections(self) -> LauncherSelections:
         common = self._build_common_kwargs()
-        bundle_value = self.saved_bundle_selection_var.get().strip()
-        mode_value = self.saved_eval_mode_var.get().strip() or None
-        use_full_transfer_mode = mode_value == "full_transfer_report"
-        use_composite_best_r2 = use_full_transfer_mode or bool(self.saved_eval_best_r2_var.get())
-        selected_combo_ids = None if use_composite_best_r2 else self._selected_saved_eval_combo_ids()
-        selected_combo_refs = self._selected_saved_eval_combo_refs() if use_composite_best_r2 else None
+        model_families: list[str] = ["linear_l2"]
+        model_family_output_modes: dict[str, list[str]] = {"linear_l2": ["single_target"]}
+        output_modes: list[str] = ["single_target"]
+        return LauncherSelections(
+            run_mode="model_testing_mode",
+            target_family=self.combo_target_family_var.get().strip(),
+            heldout_evaluation=False,
+            active_feature_banks=None,
+            force_rebuild_intermediary_features=bool(self.combo_force_rebuild_var.get()),
+            reasoning_models=None,
+            embedding_model_name=self.mt_embedding_model_var.get().strip() or None,
+            repeat_cv_with_new_seeds=bool(self.combo_repeat_cv_var.get()),
+            cv_seed_repeat_count=self._parse_optional_int(self.combo_repeat_count_var.get()),
+            distillation_nested_sweep=False,
+            save_reasoning_predictions=False,
+            candidate_feature_sets=list(self.COMBINATION_FEATURE_SET_IDS),
+            model_families=model_families,
+            output_modes=output_modes,
+            model_family_output_modes=model_family_output_modes,
+            save_model_configs_after_training=bool(self.combo_save_model_configs_var.get()),
+            saved_config_bundle_path=None,
+            saved_eval_mode=None,
+            saved_eval_success_branch_ids=None,
+            hq_exit_override_mode=None,
+            use_latest_xgb_calibration=False,
+            use_latest_rf_calibration=False,
+            use_latest_mlp_calibration=False,
+            **common,
+        )
+
+    def _combination_success_screening_selections(self) -> LauncherSelections:
+        common = self._build_common_kwargs()
+        combo_ref = self._selected_combination_combo_ref()
         return LauncherSelections(
             run_mode="saved_config_evaluation_mode",
-            target_family=self.mt_target_family_var.get().strip(),
+            target_family="v25_policies",
+            heldout_evaluation=False,
+            active_feature_banks=None,
+            force_rebuild_intermediary_features=False,
+            reasoning_models=None,
+            embedding_model_name=None,
+            repeat_cv_with_new_seeds=False,
+            cv_seed_repeat_count=1,
+            distillation_nested_sweep=False,
+            save_reasoning_predictions=False,
+            candidate_feature_sets=None,
+            model_families=None,
+            output_modes=None,
+            model_family_output_modes=None,
+            save_model_configs_after_training=False,
+            saved_config_bundle_path=self.combo_bundle_selection_var.get().strip() or None,
+            saved_eval_mode="combination_transfer_report",
+            saved_eval_combo_ids=None,
+            saved_eval_combo_refs=[combo_ref] if combo_ref else None,
+            saved_eval_success_branch_ids=None,
+            saved_eval_per_target_best_r2=False,
+            hq_exit_override_mode="both_force_off_and_on_all_branches",
+            use_latest_xgb_calibration=False,
+            use_latest_rf_calibration=False,
+            use_latest_mlp_calibration=False,
+            **common,
+        )
+
+    def _combination_success_test_selections(self) -> LauncherSelections:
+        common = self._build_common_kwargs()
+        combo_ref = self._selected_combination_combo_ref()
+        selected_branch_ids = self._selected_combination_success_branch_ids()
+        return LauncherSelections(
+            run_mode="saved_config_evaluation_mode",
+            target_family="v25_policies",
             heldout_evaluation=True,
             active_feature_banks=None,
             force_rebuild_intermediary_features=False,
@@ -1276,10 +1727,54 @@ class RunLauncher(ttk.Frame):
             output_modes=None,
             model_family_output_modes=None,
             save_model_configs_after_training=False,
+            saved_config_bundle_path=self.combo_bundle_selection_var.get().strip() or None,
+            saved_eval_mode="combination_transfer_report",
+            saved_eval_combo_ids=None,
+            saved_eval_combo_refs=[combo_ref] if combo_ref else None,
+            saved_eval_success_branch_ids=selected_branch_ids,
+            saved_eval_per_target_best_r2=False,
+            hq_exit_override_mode="both_force_off_and_on_all_branches",
+            use_latest_xgb_calibration=False,
+            use_latest_rf_calibration=False,
+            use_latest_mlp_calibration=False,
+            **common,
+        )
+
+    def _saved_eval_selections(self) -> LauncherSelections:
+        common = self._build_common_kwargs()
+        bundle_value = self.saved_bundle_selection_var.get().strip()
+        mode_value = self.saved_eval_mode_var.get().strip() or None
+        use_full_transfer_mode = mode_value == "full_transfer_report"
+        full_transfer_repeat_count = (
+            self._loaded_config.model_testing.screening_repeat_cv_count
+            if (use_full_transfer_mode and self._loaded_config is not None)
+            else 1
+        )
+        use_composite_best_r2 = bool(self.saved_eval_best_r2_var.get())
+        selected_combo_ids = None if use_composite_best_r2 else self._selected_saved_eval_combo_ids()
+        selected_combo_refs = self._selected_saved_eval_combo_refs() if use_composite_best_r2 else None
+        return LauncherSelections(
+            run_mode="saved_config_evaluation_mode",
+            target_family=self.mt_target_family_var.get().strip(),
+            heldout_evaluation=True,
+            active_feature_banks=None,
+            force_rebuild_intermediary_features=False,
+            reasoning_models=None,
+            embedding_model_name=None,
+            repeat_cv_with_new_seeds=bool(use_full_transfer_mode),
+            cv_seed_repeat_count=int(full_transfer_repeat_count),
+            distillation_nested_sweep=False,
+            save_reasoning_predictions=False,
+            candidate_feature_sets=None,
+            model_families=None,
+            output_modes=None,
+            model_family_output_modes=None,
+            save_model_configs_after_training=False,
             saved_config_bundle_path=bundle_value or None,
             saved_eval_mode=mode_value,
             saved_eval_combo_ids=selected_combo_ids,
             saved_eval_combo_refs=selected_combo_refs,
+            saved_eval_success_branch_ids=None,
             saved_eval_per_target_best_r2=use_composite_best_r2,
             hq_exit_override_mode=self.saved_hq_override_mode_var.get().strip() or None,
             use_latest_xgb_calibration=False,
@@ -1501,10 +1996,48 @@ class RunLauncher(ttk.Frame):
             return
         self._start_worker(selections, "Starting model-testing pipeline.")
 
+    def start_combination_screening(self) -> None:
+        try:
+            selections = self._combination_screening_selections()
+            if selections.repeat_cv_with_new_seeds and (selections.cv_seed_repeat_count or 0) < 2:
+                raise ValueError("Repeat count must be >= 2 when repeat CV is enabled.")
+        except ValueError as exc:
+            self.status_var.set("Invalid input")
+            self._append_log(f"ERROR: {exc}")
+            return
+        self._start_worker(selections, "Starting combination screening (train-only).")
+
+    def start_combination_success_screening(self) -> None:
+        try:
+            selections = self._combination_success_screening_selections()
+            combo_ref = selections.saved_eval_combo_refs[0] if selections.saved_eval_combo_refs else ""
+            if not combo_ref:
+                raise ValueError("Select exactly one valid combo from the selected bundle.")
+        except ValueError as exc:
+            self.status_var.set("Invalid input")
+            self._append_log(f"ERROR: {exc}")
+            return
+        self._start_worker(selections, "Starting combination success screening (train CV only).")
+
+    def start_combination_success_test_eval(self) -> None:
+        try:
+            selections = self._combination_success_test_selections()
+            combo_ref = selections.saved_eval_combo_refs[0] if selections.saved_eval_combo_refs else ""
+            if not combo_ref:
+                raise ValueError("Select exactly one valid combo from the selected bundle.")
+            selected_branches = selections.saved_eval_success_branch_ids or []
+            if not selected_branches:
+                raise ValueError("Select at least one success model branch for held-out evaluation.")
+        except ValueError as exc:
+            self.status_var.set("Invalid input")
+            self._append_log(f"ERROR: {exc}")
+            return
+        self._start_worker(selections, "Starting combination held-out success test evaluation.")
+
     def start_saved_config_eval(self) -> None:
         try:
             selections = self._saved_eval_selections()
-            is_full_transfer_mode = selections.saved_eval_mode == "full_transfer_report"
+            is_combination_transfer_mode = selections.saved_eval_mode == "combination_transfer_report"
             if selections.saved_eval_per_target_best_r2:
                 combo_refs = list(selections.saved_eval_combo_refs or [])
                 if not combo_refs:
@@ -1533,15 +2066,11 @@ class RunLauncher(ttk.Frame):
                     if first_bundle is None:
                         first_bundle = str(resolved_bundle)
                     resolved_refs.append(f"{resolved_bundle}::{combo_token}")
-                if is_full_transfer_mode and len(resolved_refs) < 3:
-                    raise ValueError(
-                        "full_transfer_report requires three combo refs "
-                        "(ridge, xgb3_regressor, mlp_regressor)."
-                    )
                 selections = replace(
                     selections,
                     saved_config_bundle_path=first_bundle,
                     saved_eval_combo_refs=resolved_refs,
+                    saved_eval_per_target_best_r2=(False if is_combination_transfer_mode else selections.saved_eval_per_target_best_r2),
                 )
             else:
                 bundle_raw = (selections.saved_config_bundle_path or "").strip()

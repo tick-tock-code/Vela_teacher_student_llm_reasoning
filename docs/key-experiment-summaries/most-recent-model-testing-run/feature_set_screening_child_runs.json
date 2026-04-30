@@ -1,9 +1,0 @@
-[
-  {
-    "target_family": "v25_policies",
-    "repeat_index": 0,
-    "repeat_seed": 42,
-    "run_dir": "in_memory_multi_output",
-    "output_mode": "multi_output"
-  }
-]

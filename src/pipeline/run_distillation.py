@@ -4,7 +4,7 @@ import argparse
 
 from src.pipeline.config import load_experiment_config
 from src.pipeline.distillation import run_pipeline
-from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides
+from src.pipeline.run_options import DEFAULT_CONFIG_PATH, RunOverrides, SUPPORTED_SUCCESS_MODEL_VARIANTS
 from src.utils.model_ids import XGB_FAMILY_ID
 
 
@@ -61,8 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--repeat-cv-with-new-seeds",
-        action="store_true",
-        help="Run distillation CV repeatedly with different random seeds and average metrics.",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable repeated CV runs with different random seeds.",
     )
     parser.add_argument(
         "--cv-seed-repeat-count",
@@ -108,7 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--saved-eval-mode",
-        choices=["reasoning_test_metrics", "success_with_pred_reasoning", "full_transfer_report"],
+        choices=[
+            "reasoning_test_metrics",
+            "success_with_pred_reasoning",
+            "full_transfer_report",
+            "combination_transfer_report",
+        ],
         help="Evaluation mode for saved_config_evaluation_mode.",
     )
     parser.add_argument(
@@ -125,6 +131,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--saved-eval-success-branch-ids",
+        nargs="*",
+        help=(
+            "Optional subset of success-branch ids for saved_config_evaluation_mode "
+            "(for example hq_plus_llm_engineering__with_override)."
+        ),
+    )
+    parser.add_argument(
+        "--success-model-variants",
+        nargs="*",
+        choices=sorted(SUPPORTED_SUCCESS_MODEL_VARIANTS),
+        help=(
+            "Success model variants to evaluate in saved_config_evaluation_mode. "
+            "Defaults to all variants."
+        ),
+    )
+    parser.add_argument(
         "--saved-eval-per-target-best-r2",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -135,7 +158,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--hq-exit-override-mode",
-        choices=["with_override", "both_with_and_without"],
+        choices=[
+            "with_override",
+            "both_with_and_without",
+            "force_off_all_branches",
+            "force_on_all_branches",
+            "both_force_off_and_on_all_branches",
+        ],
         help="HQ override behavior in saved_config_evaluation_mode success evaluation.",
     )
     parser.add_argument(
@@ -216,6 +245,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum worker threads for parallel model training (default auto: min(7, cpu_count-1)).",
     )
     parser.add_argument(
+        "--ablation-v25-19set-linear-profile",
+        action="store_true",
+        help=(
+            "Apply the locked train-only ablation profile: "
+            "model_testing_mode, v25_policies, 19 feature sets, linear_l2 only, "
+            "single_target, no repeats, no nested tuning, no held-out."
+        ),
+    )
+    parser.add_argument(
         "--distillation-nested-sweep",
         dest="nested_hyperparameter_cv",
         action="store_const",
@@ -227,6 +265,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
     args = build_parser().parse_args(argv)
+    selected_run_mode = str(args.run_mode) if args.run_mode else None
+    if bool(args.ablation_v25_19set_linear_profile) and selected_run_mode is None:
+        selected_run_mode = "model_testing_mode"
     rf_max_depth_values = None
     if args.rf_calibration_max_depth:
         rf_max_depth_values = []
@@ -270,7 +311,7 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
 
     return RunOverrides(
         config_path=args.config,
-        run_mode=str(args.run_mode) if args.run_mode else None,
+        run_mode=selected_run_mode,
         target_family=str(args.target_family) if args.target_family else None,
         heldout_evaluation=args.heldout_evaluation,
         active_feature_banks=(
@@ -285,7 +326,7 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
             else None
         ),
         embedding_model_name=str(args.embedding_model) if args.embedding_model else None,
-        repeat_cv_with_new_seeds=bool(args.repeat_cv_with_new_seeds),
+        repeat_cv_with_new_seeds=args.repeat_cv_with_new_seeds,
         cv_seed_repeat_count=args.cv_seed_repeat_count,
         distillation_nested_sweep=args.nested_hyperparameter_cv,
         save_reasoning_predictions=args.save_reasoning_predictions,
@@ -325,6 +366,16 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
             if args.saved_eval_combo_refs is not None
             else None
         ),
+        saved_eval_success_branch_ids=(
+            [str(item) for item in args.saved_eval_success_branch_ids]
+            if args.saved_eval_success_branch_ids is not None
+            else None
+        ),
+        success_model_variants=(
+            [str(item) for item in args.success_model_variants]
+            if args.success_model_variants is not None
+            else None
+        ),
         saved_eval_per_target_best_r2=args.saved_eval_per_target_best_r2,
         hq_exit_override_mode=(
             str(args.hq_exit_override_mode)
@@ -356,6 +407,7 @@ def parse_run_overrides(argv: list[str] | None = None) -> RunOverrides:
         mlp_alpha=args.mlp_alpha,
         model_testing_per_fit_threads=args.model_testing_per_fit_threads,
         max_parallel_workers=args.max_parallel_workers,
+        ablation_v25_19set_linear_profile=bool(args.ablation_v25_19set_linear_profile),
     )
 
 

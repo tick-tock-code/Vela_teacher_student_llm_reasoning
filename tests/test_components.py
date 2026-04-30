@@ -37,9 +37,14 @@ from src.pipeline.model_testing import (
 )
 from src.pipeline.config import FeatureSetSpec, load_experiment_config
 from src.pipeline.run_distillation import parse_run_overrides
-from src.pipeline.run_options import RunOverrides, resolve_run_options
+from src.pipeline.run_options import (
+    ABLATION_V25_19SET_LINEAR_FEATURE_SET_IDS,
+    RunOverrides,
+    resolve_run_options,
+)
 import src.pipeline.saved_config_evaluation as saved_eval
 from src.pipeline.saved_config_evaluation import run_saved_config_evaluation_mode
+from src.pipeline.success_protocol import default_l2_c
 from src.pipeline.mlp_calibration import load_latest_mlp_calibration
 from src.pipeline.xgb_calibration import load_latest_xgb_calibration
 from src.pipeline.rf_calibration import load_latest_rf_calibration
@@ -118,6 +123,20 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(len(taste.target_columns), 20)
         self.assertTrue(all(column.startswith("taste_") for column in taste.target_columns))
         self.assertEqual(taste.task_kind, "classification")
+
+    def test_config_contains_all_combination_bundle_feature_sets(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        feature_set_ids = {spec.feature_set_id for spec in config.distillation_feature_sets}
+        expected = {
+            "hq_plus_sentence_bundle",
+            "llm_engineering_plus_sentence_bundle",
+            "lambda_policies_plus_sentence_bundle",
+            "hq_plus_llm_engineering_plus_sentence_bundle",
+            "hq_plus_lambda_policies_plus_sentence_bundle",
+            "llm_engineering_plus_lambda_policies_plus_sentence_bundle",
+            "hq_plus_llm_engineering_plus_lambda_policies_plus_sentence_bundle",
+        }
+        self.assertTrue(expected.issubset(feature_set_ids))
 
     def test_repository_feature_bank_loader_preserves_canonical_order(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
@@ -401,6 +420,10 @@ class ComponentTests(unittest.TestCase):
             self.assertIsNotNone(launcher.setup_sentence_bundle_var)
             self.assertTrue(launcher.mt_model_family_output_vars["mlp"]["multi_output"].get())
             self.assertFalse(launcher.mt_model_family_output_vars["mlp"]["single_target"].get())
+            self.assertTrue(hasattr(launcher, "combination_tab"))
+            self.assertEqual(launcher.combo_target_family_var.get(), "v25_policies")
+            self.assertTrue(hasattr(launcher, "combo_success_branch_listbox"))
+            self.assertEqual(list(launcher.COMBINATION_FEATURE_SET_IDS)[0], "hq_plus_sentence_bundle")
 
             launcher.run_mode_var.set("reasoning_distillation_mode")
             launcher.target_family_var.set("taste_policies")
@@ -459,6 +482,80 @@ class ComponentTests(unittest.TestCase):
                 "xgb3_classifier": {"n_estimators": 320, "max_depth": 3},
             },
         )
+
+    def test_combination_screening_selections_lock_feature_grid_and_modes(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:  # pragma: no cover - depends on desktop availability
+            self.skipTest(f"Tk is unavailable in this environment: {exc}")
+        root.withdraw()
+        try:
+            launcher = RunLauncher(root)
+            launcher.combo_target_family_var.set("v25_and_taste")
+            launcher.combo_repeat_cv_var.set(True)
+            launcher.combo_repeat_count_var.set("4")
+            selections = launcher._combination_screening_selections()
+            self.assertEqual(selections.run_mode, "model_testing_mode")
+            self.assertEqual(selections.target_family, "v25_and_taste")
+            self.assertEqual(selections.candidate_feature_sets, list(launcher.COMBINATION_FEATURE_SET_IDS))
+            self.assertEqual(selections.model_families, ["linear_l2"])
+            self.assertEqual(
+                selections.model_family_output_modes,
+                {"linear_l2": ["single_target"]},
+            )
+            self.assertTrue(selections.repeat_cv_with_new_seeds)
+            self.assertEqual(selections.cv_seed_repeat_count, 4)
+            self.assertFalse(selections.heldout_evaluation)
+        finally:
+            root.destroy()
+
+    def test_combination_success_selection_builds_single_combo_ref(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:  # pragma: no cover - depends on desktop availability
+            self.skipTest(f"Tk is unavailable in this environment: {exc}")
+        root.withdraw()
+        try:
+            launcher = RunLauncher(root)
+            launcher.combo_bundle_selection_var.set("bundle_path")
+            launcher._combo_combo_choices = [
+                ("combo_1", "combo_1 | v25_policies | hq_plus_sentence_bundle | ridge | single_target"),
+            ]
+            launcher.combo_selected_combo_var.set(launcher._combo_combo_choices[0][1])
+            selections = launcher._combination_success_screening_selections()
+            self.assertEqual(selections.run_mode, "saved_config_evaluation_mode")
+            self.assertEqual(selections.saved_eval_mode, "combination_transfer_report")
+            self.assertEqual(selections.saved_eval_combo_refs, ["bundle_path::combo_1"])
+            self.assertFalse(selections.heldout_evaluation)
+            self.assertEqual(selections.hq_exit_override_mode, "both_force_off_and_on_all_branches")
+        finally:
+            root.destroy()
+
+    def test_combination_success_test_selection_includes_selected_branches(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:  # pragma: no cover - depends on desktop availability
+            self.skipTest(f"Tk is unavailable in this environment: {exc}")
+        root.withdraw()
+        try:
+            launcher = RunLauncher(root)
+            launcher.combo_bundle_selection_var.set("bundle_path")
+            launcher._combo_combo_choices = [
+                ("combo_1", "combo_1 | v25_policies | hq_plus_sentence_bundle | ridge | single_target"),
+            ]
+            launcher.combo_selected_combo_var.set(launcher._combo_combo_choices[0][1])
+            launcher._refresh_combination_success_branch_choices()
+            launcher.combo_success_branch_listbox.selection_clear(0, "end")
+            launcher.combo_success_branch_listbox.selection_set(0)
+            launcher.combo_success_branch_listbox.selection_set(1)
+            selections = launcher._combination_success_test_selections()
+            self.assertEqual(selections.run_mode, "saved_config_evaluation_mode")
+            self.assertEqual(selections.saved_eval_mode, "combination_transfer_report")
+            self.assertTrue(selections.heldout_evaluation)
+            self.assertEqual(len(selections.saved_eval_success_branch_ids or []), 2)
+            self.assertEqual(selections.saved_eval_combo_refs, ["bundle_path::combo_1"])
+        finally:
+            root.destroy()
 
     def test_xgb_depth_test_batch_selections_are_locked_preset(self) -> None:
         try:
@@ -605,6 +702,9 @@ class ComponentTests(unittest.TestCase):
             ),
         )
         self.assertFalse(resolved.distillation_nested_sweep)
+
+    def test_fixed_success_lr_default_c_prefers_one(self) -> None:
+        self.assertEqual(default_l2_c([0.01, 0.1, 1.0, 5.0, 10.0]), 1.0)
 
     def test_model_testing_mode_accepts_multi_output_selection(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
@@ -808,6 +908,52 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(overrides.mlp_calibration_alpha, [0.001, 0.01])
         self.assertTrue(overrides.use_latest_mlp_calibration)
 
+    def test_cli_parsing_supports_ablation_v25_19set_linear_profile_flag(self) -> None:
+        overrides = parse_run_overrides(
+            [
+                "--config",
+                "experiments/teacher_student_distillation_v1.json",
+                "--ablation-v25-19set-linear-profile",
+            ]
+        )
+        self.assertTrue(overrides.ablation_v25_19set_linear_profile)
+        self.assertEqual(overrides.run_mode, "model_testing_mode")
+
+    def test_ablation_v25_19set_linear_profile_resolves_locked_train_only_settings(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                # These conflicting values should be ignored by the locked profile.
+                run_mode="reasoning_distillation_mode",
+                target_family="taste_policies",
+                heldout_evaluation=True,
+                candidate_feature_sets=["sentence_bundle"],
+                model_families=["xgb3"],
+                repeat_cv_with_new_seeds=True,
+                cv_seed_repeat_count=4,
+                distillation_nested_sweep=True,
+                save_model_configs_after_training=True,
+                use_latest_xgb_calibration=True,
+                ablation_v25_19set_linear_profile=True,
+            ),
+        )
+        self.assertTrue(resolved.ablation_v25_19set_linear_profile)
+        self.assertEqual(resolved.run_mode, "model_testing_mode")
+        self.assertEqual(resolved.target_family.family_id, "v25_policies")
+        self.assertFalse(resolved.heldout_evaluation)
+        self.assertEqual(resolved.model_families, ["linear_l2"])
+        self.assertEqual(resolved.output_modes, ["single_target"])
+        self.assertFalse(resolved.repeat_cv_with_new_seeds)
+        self.assertEqual(resolved.cv_seed_repeat_count, 1)
+        self.assertFalse(resolved.distillation_nested_sweep)
+        self.assertFalse(resolved.save_model_configs_after_training)
+        self.assertFalse(resolved.use_latest_xgb_calibration)
+        self.assertEqual(
+            resolved.candidate_feature_sets,
+            list(ABLATION_V25_19SET_LINEAR_FEATURE_SET_IDS),
+        )
+
     def test_model_testing_mode_can_enable_latest_xgb_calibration_toggle(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
         resolved = resolve_run_options(
@@ -926,6 +1072,43 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(
             overrides.saved_eval_combo_refs,
             ["bundle_a::combo_ridge", "bundle_b::combo_xgb", "bundle_c::combo_mlp"],
+        )
+
+    def test_cli_parsing_supports_combination_transfer_saved_eval_mode(self) -> None:
+        overrides = parse_run_overrides(
+            [
+                "--config",
+                "experiments/teacher_student_distillation_v1.json",
+                "--run-mode",
+                "saved_config_evaluation_mode",
+                "--saved-eval-mode",
+                "combination_transfer_report",
+                "--saved-eval-combo-refs",
+                "bundle_combo::combo_id",
+            ]
+        )
+        self.assertEqual(overrides.saved_eval_mode, "combination_transfer_report")
+        self.assertEqual(overrides.saved_eval_combo_refs, ["bundle_combo::combo_id"])
+
+    def test_cli_parsing_supports_combination_success_branch_filter(self) -> None:
+        overrides = parse_run_overrides(
+            [
+                "--config",
+                "experiments/teacher_student_distillation_v1.json",
+                "--run-mode",
+                "saved_config_evaluation_mode",
+                "--saved-eval-mode",
+                "combination_transfer_report",
+                "--saved-eval-combo-refs",
+                "bundle_combo::combo_id",
+                "--saved-eval-success-branch-ids",
+                "hq_baseline__with_override",
+                "llm_engineering__without_override",
+            ]
+        )
+        self.assertEqual(
+            overrides.saved_eval_success_branch_ids,
+            ["hq_baseline__with_override", "llm_engineering__without_override"],
         )
 
     def test_saved_config_eval_mode_resolves_combo_ids(self) -> None:
@@ -1108,6 +1291,31 @@ class ComponentTests(unittest.TestCase):
                 ),
             )
 
+    def test_saved_config_eval_mode_combination_transfer_requires_combo_refs(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        with self.assertRaises(RuntimeError):
+            resolve_run_options(
+                config,
+                RunOverrides(
+                    run_mode="saved_config_evaluation_mode",
+                    saved_config_bundle_path="data/saved_model_configs/example_run",
+                    saved_eval_mode="combination_transfer_report",
+                ),
+            )
+
+    def test_saved_config_eval_mode_combination_transfer_accepts_single_combo_ref(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        resolved = resolve_run_options(
+            config,
+            RunOverrides(
+                run_mode="saved_config_evaluation_mode",
+                saved_eval_mode="combination_transfer_report",
+                saved_eval_combo_refs=["bundle_a::combo_selected"],
+            ),
+        )
+        self.assertEqual(resolved.saved_eval_mode, "combination_transfer_report")
+        self.assertEqual(resolved.saved_eval_combo_refs, ["bundle_a::combo_selected"])
+
     def test_saved_config_eval_mode_full_transfer_accepts_combo_refs(self) -> None:
         config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
         resolved = resolve_run_options(
@@ -1154,6 +1362,42 @@ class ComponentTests(unittest.TestCase):
         ]
         with self.assertRaises(RuntimeError):
             saved_eval._validate_full_transfer_combo_refs(combos)
+
+    def test_combination_transfer_combo_validation_enforces_single_v25_combo(self) -> None:
+        with self.assertRaises(RuntimeError):
+            saved_eval._validate_combination_transfer_combo_refs([])
+        with self.assertRaises(RuntimeError):
+            saved_eval._validate_combination_transfer_combo_refs(
+                [
+                    {
+                        "combo_id": "combo_1",
+                        "target_family": "taste_policies",
+                        "feature_set_id": "hq_plus_sentence_bundle",
+                        "task_kind": "classification",
+                        "model_id": "logreg_classifier",
+                    }
+                ]
+            )
+
+        combo = saved_eval._validate_combination_transfer_combo_refs(
+            [
+                {
+                    "combo_id": "combo_ok",
+                    "target_family": "v25_policies",
+                    "feature_set_id": "hq_plus_sentence_bundle",
+                    "task_kind": "regression",
+                    "model_id": "ridge",
+                }
+            ]
+        )
+        self.assertEqual(combo["combo_id"], "combo_ok")
+
+    def test_combination_transfer_leakage_guard_rejects_policy_columns(self) -> None:
+        with self.assertRaises(RuntimeError):
+            saved_eval._assert_no_policy_target_columns(
+                pd.DataFrame({"v25_policy_feature": [0.1], "x": [1.0]}),
+                label="test_frame",
+            )
 
     def test_build_best_r2_assignment_prefers_ridge_on_tie(self) -> None:
         combos = [
@@ -1281,6 +1525,21 @@ class ComponentTests(unittest.TestCase):
         fake_protocol = {
             "selected_c_final": 5.0,
             "selected_c_oof_mean": 2.5,
+            "threshold": 0.5,
+            "oof_scores": np.linspace(0.2, 0.8, len(train_ids)),
+            "test_scores": np.linspace(0.3, 0.7, len(test_ids)),
+            "cv_metrics": {
+                "roc_auc": 0.71,
+                "pr_auc": 0.61,
+                "precision": 0.51,
+                "recall": 0.41,
+                "f0_5": 0.46,
+                "brier": 0.2,
+                "precision_at_01": 0.51,
+                "precision_at_05": 0.51,
+                "precision_at_10": 0.51,
+                "threshold": 0.5,
+            },
             "test_metrics": {
                 "roc_auc": 0.7,
                 "pr_auc": 0.6,
@@ -1294,22 +1553,234 @@ class ComponentTests(unittest.TestCase):
                 "threshold": 0.5,
             },
         }
+        fake_soft_ensemble = {
+            "selected_c_final": 5.0,
+            "selected_c_oof_mean": 2.5,
+            "voter_count": 5,
+            "variants": {
+                "soft_avg_model": {
+                    "threshold": 0.4,
+                    "selected_train_f0_5": 0.46,
+                    "repeat_train_metrics": [dict(fake_protocol["test_metrics"])],
+                    "repeat_test_metrics": [dict(fake_protocol["test_metrics"])],
+                    "test_metrics": dict(fake_protocol["test_metrics"]),
+                    "threshold_sweep": [
+                        {
+                            "threshold": 0.4,
+                            "f0_5": 0.46,
+                            "roc_auc": 0.7,
+                            "pr_auc": 0.6,
+                            "precision": 0.5,
+                            "recall": 0.4,
+                        }
+                    ],
+                },
+                "soft_avg_weighted_model": {
+                    "threshold": 0.45,
+                    "selected_train_f0_5": 0.47,
+                    "repeat_train_metrics": [dict(fake_protocol["test_metrics"])],
+                    "repeat_test_metrics": [dict(fake_protocol["test_metrics"])],
+                    "test_metrics": dict(fake_protocol["test_metrics"]),
+                    "threshold_sweep": [
+                        {
+                            "threshold": 0.45,
+                            "f0_5": 0.47,
+                            "roc_auc": 0.7,
+                            "pr_auc": 0.6,
+                            "precision": 0.5,
+                            "recall": 0.4,
+                        }
+                    ],
+                },
+            },
+        }
 
         with patch(
             "src.pipeline.saved_config_evaluation.run_nested_l2_success_protocol",
             return_value=fake_protocol,
+        ), patch(
+            "src.pipeline.saved_config_evaluation.run_nested_l2_soft_ensemble_success_protocol",
+            return_value=fake_soft_ensemble,
         ):
-            metrics = saved_eval._evaluate_success_transfer(
+            metrics, threshold_sweep = saved_eval._evaluate_success_transfer(
                 config=config,
                 predictions_by_model_set=predictions_by_model_set,
                 repository_splits=repository_splits,
                 repository_banks=repository_banks,
+                hq_exit_override_mode="with_override",
             )
-        self.assertEqual(len(metrics), 12)
+        self.assertEqual(len(metrics), 36)
+        self.assertFalse(threshold_sweep.empty)
         self.assertEqual(
             sorted(metrics["branch_id"].unique().tolist()),
             sorted(["pred_reasoning_only", "hq_plus_pred_reasoning", "llm_engineering_plus_pred_reasoning"]),
         )
+
+    def test_combination_transfer_success_branch_matrix_has_7_rows(self) -> None:
+        config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+        train_ids = [f"tr_{idx}" for idx in range(10)]
+        test_ids = [f"te_{idx}" for idx in range(6)]
+        labels = pd.DataFrame(
+            {
+                "founder_uuid": train_ids + test_ids,
+                "split": ["train"] * len(train_ids) + ["test"] * len(test_ids),
+                "success": [0, 1] * 8,
+            }
+        )
+        repository_splits = LoadedFeatureRepositorySplits(
+            labels_frame=labels,
+            train_ids=train_ids,
+            test_ids=test_ids,
+            train_labels=labels[labels["split"] == "train"].reset_index(drop=True),
+            test_labels=labels[labels["split"] == "test"].reset_index(drop=True),
+        )
+
+        def _bank_frame(ids: list[str], *, include_exit: bool) -> pd.DataFrame:
+            frame = pd.DataFrame(
+                {
+                    "founder_uuid": ids,
+                    "f1": np.linspace(0.0, 1.0, len(ids)),
+                    "f2": np.linspace(1.0, 2.0, len(ids)),
+                }
+            )
+            if include_exit:
+                frame["exit_count"] = np.where(np.arange(len(ids)) % 3 == 0, 1, 0)
+            return frame
+
+        repository_banks = {
+            "hq_baseline": SimpleNamespace(
+                public_frame=_bank_frame(train_ids, include_exit=True),
+                private_frame=_bank_frame(test_ids, include_exit=True),
+                binary_feature_columns=["f2"],
+            ),
+            "llm_engineering": SimpleNamespace(
+                public_frame=_bank_frame(train_ids, include_exit=False),
+                private_frame=_bank_frame(test_ids, include_exit=False),
+                binary_feature_columns=[],
+            ),
+            "lambda_policies": SimpleNamespace(
+                public_frame=_bank_frame(train_ids, include_exit=False),
+                private_frame=_bank_frame(test_ids, include_exit=False),
+                binary_feature_columns=[],
+            ),
+        }
+
+        prediction_columns = [f"v25_p{idx}" for idx in range(1, 5)]
+        pred_train = pd.DataFrame({col: np.linspace(0.2, 0.8, len(train_ids)) for col in prediction_columns})
+        pred_test = pd.DataFrame({col: np.linspace(0.3, 0.7, len(test_ids)) for col in prediction_columns})
+        pred_train.index = train_ids
+        pred_test.index = test_ids
+
+        fake_protocol = {
+            "selected_c_final": 5.0,
+            "threshold": 0.5,
+            "oof_scores": np.linspace(0.2, 0.8, len(train_ids)),
+            "cv_metrics": {
+                "roc_auc": 0.71,
+                "pr_auc": 0.61,
+                "precision": 0.51,
+                "recall": 0.41,
+                "f0_5": 0.46,
+                "brier": 0.2,
+                "precision_at_01": 0.51,
+                "precision_at_05": 0.51,
+                "precision_at_10": 0.51,
+                "threshold": 0.5,
+            },
+            "test_metrics": {
+                "roc_auc": 0.7,
+                "pr_auc": 0.6,
+                "precision": 0.5,
+                "recall": 0.4,
+                "f0_5": 0.45,
+                "brier": 0.2,
+                "precision_at_01": 0.5,
+                "precision_at_05": 0.5,
+                "precision_at_10": 0.5,
+                "threshold": 0.5,
+            },
+        }
+        fake_soft_ensemble = {
+            "selected_c_final": 5.0,
+            "selected_c_oof_mean": 2.5,
+            "voter_count": 5,
+            "variants": {
+                "soft_avg_model": {
+                    "threshold": 0.4,
+                    "selected_train_f0_5": 0.46,
+                    "repeat_train_metrics": [dict(fake_protocol["cv_metrics"])],
+                    "repeat_test_metrics": [dict(fake_protocol["test_metrics"])],
+                    "test_metrics": dict(fake_protocol["test_metrics"]),
+                    "threshold_sweep": [
+                        {
+                            "threshold": 0.4,
+                            "f0_5": 0.46,
+                            "roc_auc": 0.7,
+                            "pr_auc": 0.6,
+                            "precision": 0.5,
+                            "recall": 0.4,
+                        }
+                    ],
+                },
+                "soft_avg_weighted_model": {
+                    "threshold": 0.45,
+                    "selected_train_f0_5": 0.47,
+                    "repeat_train_metrics": [dict(fake_protocol["cv_metrics"])],
+                    "repeat_test_metrics": [dict(fake_protocol["test_metrics"])],
+                    "test_metrics": dict(fake_protocol["test_metrics"]),
+                    "threshold_sweep": [
+                        {
+                            "threshold": 0.45,
+                            "f0_5": 0.47,
+                            "roc_auc": 0.7,
+                            "pr_auc": 0.6,
+                            "precision": 0.5,
+                            "recall": 0.4,
+                        }
+                    ],
+                },
+            },
+        }
+
+        with patch(
+            "src.pipeline.saved_config_evaluation.run_nested_l2_success_protocol",
+            return_value=fake_protocol,
+        ), patch(
+            "src.pipeline.saved_config_evaluation.run_nested_l2_soft_ensemble_success_protocol",
+            return_value=fake_soft_ensemble,
+        ):
+            metrics, threshold_sweep = saved_eval._evaluate_combination_success_transfer(
+                config=config,
+                combo={
+                    "combo_id": "combo_selected",
+                    "feature_set_id": "hq_plus_sentence_bundle",
+                    "model_id": "ridge",
+                    "output_mode": "single_target",
+                },
+                pred_train=pred_train,
+                pred_test=pred_test,
+                repository_splits=repository_splits,
+                repository_banks=repository_banks,
+                hq_exit_override_mode="with_override",
+                evaluate_test=True,
+            )
+        self.assertEqual(len(metrics), 21)
+        self.assertFalse(threshold_sweep.empty)
+        self.assertEqual(
+            sorted(set(metrics["base_combo_id"].tolist())),
+            sorted(
+                [
+                    "hq_baseline",
+                    "llm_engineering",
+                    "lambda_policies",
+                    "hq_plus_llm_engineering",
+                    "hq_plus_lambda_policies",
+                    "llm_engineering_plus_lambda_policies",
+                    "hq_plus_llm_engineering_plus_lambda_policies",
+                ]
+            ),
+        )
+        self.assertGreater(int(metrics["hq_exit_override_applied"].sum()), 0)
 
     def test_saved_config_eval_full_transfer_writes_expected_artifacts(self) -> None:
         root = _workspace_temp_dir()
@@ -1385,6 +1856,28 @@ class ComponentTests(unittest.TestCase):
                     }
                 ),
             ), patch(
+                "src.pipeline.saved_config_evaluation._build_source_cv_transfer_metrics",
+                return_value=(
+                    pd.DataFrame(
+                        {
+                            "model_set_id": ["ridge"],
+                            "target_id": ["v25_p1"],
+                            "r2": [0.3],
+                            "rmse": [0.2],
+                            "mae": [0.1],
+                        }
+                    ),
+                    pd.DataFrame(
+                        {
+                            "model_set_id": ["ridge"],
+                            "r2_mean": [0.3],
+                            "r2_std": [0.0],
+                            "rmse_mean": [0.2],
+                            "mae_mean": [0.1],
+                        }
+                    ),
+                ),
+            ), patch(
                 "src.pipeline.saved_config_evaluation._load_reproduction_consistency_reference",
                 return_value=(pd.DataFrame(), "repro_source"),
             ), patch(
@@ -1417,6 +1910,113 @@ class ComponentTests(unittest.TestCase):
             self.assertTrue((run_dir / "success_transfer_metrics.csv").exists())
             self.assertTrue((run_dir / "reproduction_consistency_check.csv").exists())
             self.assertTrue((run_dir / "full_transfer_report.md").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_saved_config_eval_combination_transfer_writes_expected_artifacts(self) -> None:
+        root = _workspace_temp_dir()
+        try:
+            bundle_dir = root / "bundle"
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            (bundle_dir / "bundle_manifest.json").write_text(
+                (
+                    "{"
+                    '"bundle_version":1,'
+                    '"source_run_dir":"run_source",'
+                    '"combos":['
+                    '{"combo_id":"combo_selected","target_family":"v25_policies","feature_set_id":"hq_plus_sentence_bundle","task_kind":"regression","model_id":"ridge","output_mode":"single_target"}'
+                    "]"
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+            config = load_experiment_config("experiments/teacher_student_distillation_v1.json")
+            feature_set_stub = SimpleNamespace(
+                public_frame=pd.DataFrame({"founder_uuid": ["a", "b"]}),
+                private_frame=pd.DataFrame({"founder_uuid": ["x", "y"]}),
+            )
+            pred_stub = pd.DataFrame({"v25_p1": [0.2, 0.4]})
+            source_cv_per_target = pd.DataFrame(
+                {"target_id": ["v25_p1"], "r2": [0.3], "rmse": [0.2], "mae": [0.1]}
+            )
+            source_cv_summary = pd.DataFrame(
+                {
+                    "combo_id": ["combo_selected"],
+                    "feature_set_id": ["hq_plus_sentence_bundle"],
+                    "model_id": ["ridge"],
+                    "output_mode": ["single_target"],
+                    "r2_mean": [0.3],
+                    "r2_std": [0.0],
+                    "rmse_mean": [0.2],
+                    "mae_mean": [0.1],
+                }
+            )
+            reasoning_per_target = pd.DataFrame(
+                {"target_id": ["v25_p1"], "r2": [0.25], "rmse": [0.22], "mae": [0.11]}
+            )
+            reasoning_summary = pd.DataFrame(
+                {
+                    "combo_id": ["combo_selected"],
+                    "feature_set_id": ["hq_plus_sentence_bundle"],
+                    "model_id": ["ridge"],
+                    "output_mode": ["single_target"],
+                    "r2_mean": [0.25],
+                    "r2_std": [0.0],
+                    "rmse_mean": [0.22],
+                    "mae_mean": [0.11],
+                }
+            )
+            success_metrics = pd.DataFrame(
+                {
+                    "base_combo_id": ["hq_baseline"],
+                    "train_cv_f0_5": [0.3],
+                    "test_f0_5": [0.31],
+                    "train_cv_roc_auc": [0.6],
+                    "test_roc_auc": [0.61],
+                    "train_cv_pr_auc": [0.4],
+                    "test_pr_auc": [0.41],
+                    "selected_c_final": [5.0],
+                    "threshold": [0.5],
+                }
+            )
+
+            with patch(
+                "src.pipeline.saved_config_evaluation._load_feature_sets_for_bundle",
+                return_value=({"hq_plus_sentence_bundle": feature_set_stub}, None, {}),
+            ), patch(
+                "src.pipeline.saved_config_evaluation.load_target_family",
+                return_value=SimpleNamespace(
+                    family_id="v25_policies",
+                    target_columns=["v25_p1"],
+                    test_frame=pd.DataFrame({"founder_uuid": ["x", "y"], "v25_p1": [0.3, 0.5]}),
+                ),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._predict_combo_on_frame",
+                side_effect=[pred_stub, pred_stub],
+            ), patch(
+                "src.pipeline.saved_config_evaluation._build_combination_source_cv_summary",
+                return_value=(source_cv_per_target, source_cv_summary),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._evaluate_combination_reasoning_transfer",
+                return_value=(reasoning_per_target, reasoning_summary),
+            ), patch(
+                "src.pipeline.saved_config_evaluation._evaluate_combination_success_transfer",
+                return_value=success_metrics,
+            ):
+                run_dir = run_saved_config_evaluation_mode(
+                    config,
+                    RunOverrides(
+                        run_mode="saved_config_evaluation_mode",
+                        saved_eval_mode="combination_transfer_report",
+                        saved_eval_combo_refs=[f"{bundle_dir}::combo_selected"],
+                    ),
+                )
+            self.assertTrue((run_dir / "combination_transfer_source_cv_per_target.csv").exists())
+            self.assertTrue((run_dir / "combination_transfer_source_cv_summary.csv").exists())
+            self.assertTrue((run_dir / "combination_transfer_reasoning_per_target.csv").exists())
+            self.assertTrue((run_dir / "combination_transfer_reasoning_summary.csv").exists())
+            self.assertTrue((run_dir / "combination_transfer_success_metrics.csv").exists())
+            self.assertTrue((run_dir / "combination_transfer_report.md").exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

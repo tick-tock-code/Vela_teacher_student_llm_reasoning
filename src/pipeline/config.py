@@ -680,7 +680,7 @@ def load_experiment_config(path: str) -> ExperimentConfig:
             normalize_xgb_family_id(str(value))
             for value in model_testing_payload.get(
                 "default_model_families",
-                ["linear_l2", "linear_svm", XGB_FAMILY_ID, "mlp", "randomforest"],
+                ["linear_l2"],
             )
         ],
         save_model_configs_after_training_default=bool(
@@ -690,7 +690,7 @@ def load_experiment_config(path: str) -> ExperimentConfig:
             )
         ),
         screening_repeat_cv_count=int(
-            model_testing_payload.get("screening_repeat_cv_count", 3)
+            model_testing_payload.get("screening_repeat_cv_count", 16)
         ),
         screening_score_delta=float(model_testing_payload.get("screening_score_delta", 0.005)),
         max_recommended_feature_sets=int(

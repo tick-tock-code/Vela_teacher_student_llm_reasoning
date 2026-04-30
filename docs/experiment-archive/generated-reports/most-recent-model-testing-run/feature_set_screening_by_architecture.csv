@@ -1,0 +1,3 @@
+target_family,output_mode,model_architecture,model_ids,feature_set_id,rank,primary_metric,primary_mean,primary_std,screen_score,recommended_take_forward,r2_mean,rmse_mean,mae_mean,f0_5_mean,roc_auc_mean,pr_auc_mean
+v25_policies,multi_output,mlp,mlp_regressor,llm_engineering,1,r2,-1.5362713577371279,0.5970878339069176,-1.8348152746905866,True,-1.5362713577371279,0.1749878892097067,0.15390237266008966,,,
+v25_policies,multi_output,mlp,mlp_regressor,hq_baseline,2,r2,-5.78072501713782,2.355688687738651,-6.958569361007146,False,-5.78072501713782,0.3067086461120667,0.2651530821559353,,,

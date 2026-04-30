@@ -157,12 +157,9 @@ def _render_summary_markdown(
     return "\n".join(lines)
 
 
-def _latest_and_archive_paths(run_dir: Path) -> tuple[Path, Path]:
-    docs_dir = DOCS_DIR / "key-experiment-summaries"
-    stamp = run_dir.name.replace("_rf_calibration", "")
-    latest = docs_dir / "rf_calibration_summary_latest.md"
-    archive = docs_dir / f"rf_calibration_summary_{stamp}.md"
-    return latest, archive
+def _latest_path() -> Path:
+    docs_dir = DOCS_DIR / "experiment-archive" / "generated-reports"
+    return docs_dir / "rf_calibration_summary_latest.md"
 
 
 def _compute_primary_metrics(
@@ -413,9 +410,7 @@ def run_rf_calibration_mode(
         parallel_workers=parallel_workers,
     )
     write_markdown(run_dir / "rf_calibration_summary.md", summary_text)
-    latest_path, archive_path = _latest_and_archive_paths(run_dir)
-    write_markdown(latest_path, summary_text)
-    write_markdown(archive_path, summary_text)
+    write_markdown(_latest_path(), summary_text)
 
     _log(logger, f"RF calibration run complete. Artifacts written to {run_dir}.")
     return run_dir

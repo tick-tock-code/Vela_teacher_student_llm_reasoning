@@ -197,6 +197,43 @@
         "sentence_prose",
         "sentence_structured"
       ]
+    },
+    {
+      "feature_set_id": "hq_plus_llm_engineering_plus_sentence_bundle",
+      "feature_bank_ids": [
+        "hq_baseline",
+        "llm_engineering",
+        "sentence_prose",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "hq_plus_lambda_policies_plus_sentence_bundle",
+      "feature_bank_ids": [
+        "hq_baseline",
+        "lambda_policies",
+        "sentence_prose",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "llm_engineering_plus_lambda_policies_plus_sentence_bundle",
+      "feature_bank_ids": [
+        "llm_engineering",
+        "lambda_policies",
+        "sentence_prose",
+        "sentence_structured"
+      ]
+    },
+    {
+      "feature_set_id": "hq_plus_llm_engineering_plus_lambda_policies_plus_sentence_bundle",
+      "feature_bank_ids": [
+        "hq_baseline",
+        "llm_engineering",
+        "lambda_policies",
+        "sentence_prose",
+        "sentence_structured"
+      ]
     }
   ],
   "target_families": [
@@ -332,17 +369,11 @@
       "step": 0.01
     },
     "logistic_c_grid": [
-      0.0005,
-      0.001,
-      0.005,
       0.01,
-      0.02,
       0.05,
       0.1,
-      0.2,
       0.5,
-      1.0,
-      5.0
+      1.0
     ],
     "lambda_ranking": {
       "c": 0.05,
@@ -490,14 +521,10 @@
       "sentence_prose"
     ],
     "default_model_families": [
-      "linear_l2",
-      "linear_svm",
-      "xgb3",
-      "mlp",
-      "randomforest"
+      "linear_l2"
     ],
     "save_model_configs_after_training_default": false,
-    "screening_repeat_cv_count": 3,
+    "screening_repeat_cv_count": 16,
     "screening_score_delta": 0.005,
     "max_recommended_feature_sets": 3,
     "xgb_calibration_estimators": [
